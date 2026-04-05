@@ -1,0 +1,35 @@
+[package]
+name = "julian-walker"
+version = "0.1.0"
+edition = "2024"
+description = "Julian's cognitive engine — parallel graph traversal for the unified graph model"
+
+[dependencies]
+# HTTP server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
+
+# Parallelism
+rayon = "1.10"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+rand = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1.0.102"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
