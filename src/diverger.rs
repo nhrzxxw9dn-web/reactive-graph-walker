@@ -301,12 +301,21 @@ impl Diverger {
                             // ── MOTOR CORTEX: if walk produced actionable result, command Julian ──
                             // Only act on walks with enough substance (3+ hops, has domains)
                             if hops >= 3 && !domains.is_empty() {
-                                let action = if surprises >= 2 {
+                                let dead_ends = result.dead_ends;
+                                let action = if dead_ends >= 2 && !domains.is_empty() {
+                                    "search"  // Hit dead ends = knowledge gap → search
+                                } else if surprises >= 2 {
                                     "explore"  // Cross-domain discovery
                                 } else if hops >= 4 && surprises == 0 {
                                     "journal"  // Deep traversal, no surprise = reflection
                                 } else {
-                                    "nothing"  // Not enough signal
+                                    "nothing"
+                                };
+
+                                let search_query = if action == "search" {
+                                    Some(format!("{} latest", domains.first().cloned().unwrap_or_default()))
+                                } else {
+                                    None
                                 };
 
                                 if action != "nothing" && !julian_url.is_empty() {
@@ -314,13 +323,13 @@ impl Diverger {
                                         action: action.to_string(),
                                         domain: domains.first().cloned().unwrap_or_default(),
                                         walker_context: format!(
-                                            "Spontaneous thought: {} hops through {:?}, {} surprises",
-                                            hops, domains, surprises
+                                            "Spontaneous thought: {} hops through {:?}, {} surprises, {} dead ends",
+                                            hops, domains, surprises, dead_ends
                                         ),
                                         expression_seeds: Vec::new(),
                                         confidence: if surprises > 0 { 0.4 } else { 0.6 },
                                         novelty: surprises as f32 / hops.max(1) as f32,
-                                        search_query: None,
+                                        search_query,
                                     };
                                     crate::motor::execute(&julian_url, cmd).await;
                                 }
