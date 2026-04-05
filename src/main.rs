@@ -19,6 +19,7 @@ mod dream;
 mod metacog;
 mod episodic;
 mod friction;
+mod music;
 mod tools;
 mod speech;
 mod api;

@@ -101,6 +101,8 @@ pub async fn serve(
         .route("/tools/execute", post(execute_tool_endpoint))
         .route("/speak", post(speak_endpoint))
         .route("/dream", post(dream_endpoint))
+        .route("/music", get(music_endpoint))
+        .route("/music/midi", get(music_midi_endpoint))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -232,6 +234,32 @@ async fn speak_endpoint(
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
+}
+
+/// GET /music — current emotional state as music parameters
+async fn music_endpoint(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::music::MusicParams> {
+    let sm = state.self_model.lock().unwrap();
+    Json(crate::music::emotion_to_music(&sm))
+}
+
+/// GET /music/midi — generate MIDI from current emotional state
+async fn music_midi_endpoint(
+    State(state): State<Arc<AppState>>,
+) -> (axum::http::StatusCode, [(axum::http::header::HeaderName, &'static str); 2], axum::body::Bytes) {
+    let sm = state.self_model.lock().unwrap();
+    let params = crate::music::emotion_to_music(&sm);
+    let midi = crate::music::generate_midi(&params);
+
+    (
+        axum::http::StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "audio/midi"),
+            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"julian_mood.mid\""),
+        ],
+        axum::body::Bytes::from(midi),
+    )
 }
 
 /// POST /dream — enter REM sleep, run Monte Carlo graph exploration
