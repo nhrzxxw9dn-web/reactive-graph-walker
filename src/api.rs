@@ -94,6 +94,10 @@ pub async fn serve(
         .route("/edge", post(create_edge_endpoint))
         .route("/diverger/notify", post(diverger_notify))
         .route("/self", get(self_state))
+        .route("/self/save", post(save_self_model_endpoint))
+        .route("/tools", get(list_tools))
+        .route("/tools/execute", post(execute_tool_endpoint))
+        .route("/speak", post(speak_endpoint))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -148,6 +152,65 @@ async fn walk(
 async fn self_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let sm = state.self_model.lock().unwrap();
     Json(serde_json::to_value(&*sm).unwrap_or_default())
+}
+
+/// POST /self/save — persist self-model to database
+async fn save_self_model_endpoint(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sm = state.self_model.lock().unwrap().clone();
+    match db::save_self_model(&state.pool, &sm).await {
+        Ok(_) => Json(serde_json::json!({"status": "saved"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+    }
+}
+
+/// GET /tools — list available tools
+async fn list_tools() -> Json<Vec<crate::tools::Tool>> {
+    Json(crate::tools::available_tools())
+}
+
+/// POST /tools/execute — execute a tool by name
+#[derive(Deserialize)]
+struct ToolExecRequest {
+    tool: String,
+    params: serde_json::Value,
+}
+
+async fn execute_tool_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ToolExecRequest>,
+) -> Json<crate::tools::ToolResult> {
+    let result = crate::tools::execute_tool(&req.tool, req.params, &state.pool).await;
+
+    // Feed tool result through self-model
+    {
+        let mut sm = state.self_model.lock().unwrap();
+        let signal = crate::core::Signal::new(
+            if result.success { "tool_success" } else { "tool_failure" },
+            &format!("{}: {}", result.tool, &result.content[..result.content.len().min(100)]),
+        ).with_intensity(if result.success { 0.3 } else { 0.2 });
+        crate::core::process(signal, &mut sm);
+    }
+
+    Json(result)
+}
+
+/// POST /speak — text-to-speech
+#[derive(Deserialize)]
+struct SpeakRequest {
+    text: String,
+}
+
+async fn speak_endpoint(
+    Json(req): Json<SpeakRequest>,
+) -> Result<axum::body::Bytes, StatusCode> {
+    let config = crate::speech::SpeechConfig::default();
+    match crate::speech::speak(&req.text, &config).await {
+        Ok(audio) => Ok(axum::body::Bytes::from(audio)),
+        Err(e) => {
+            tracing::warn!("[speech] TTS failed: {}", e);
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
 }
 
 /// GET /stats — graph topology

@@ -20,7 +20,7 @@ use serde::Serialize;
 // recall, walker output, emotional impulse, web data, speech.
 // All the same type. All pass through the same primitive.
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Signal {
     /// What kind of signal (perception, memory, walk, emotion, web, speech, internal)
     pub kind: String,
@@ -71,7 +71,7 @@ impl Signal {
 // What the self-model observed about its own change during a
 // computation. Noticings accumulate into goals, tensions, growth.
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Noticing {
     /// What was noticed (pattern, surprise, conflict, drift, wound, competence)
     pub kind: String,
@@ -92,7 +92,7 @@ pub struct Noticing {
 // Not a log. Not a state dump. A living model that participates
 // in and is changed by every operation.
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct SelfModel {
     // ── Who I am (persistent, slow-changing) ──
     /// What I keep doing (domain → count of recent signals)
@@ -127,7 +127,7 @@ pub struct SelfModel {
 
 /// A pattern that emerged from accumulated noticings.
 /// This IS a goal — not synthesized, but noticed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct EmergentPattern {
     /// What the pattern is ("I keep thinking about markets")
     pub description: String,

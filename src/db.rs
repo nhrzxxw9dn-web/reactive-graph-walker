@@ -217,6 +217,31 @@ pub async fn prune_edges(pool: &PgPool, decay_per_day: f32, min_weight: f32) -> 
     Ok((decayed, deleted))
 }
 
+/// Save self-model state to database (persistence across restarts)
+pub async fn save_self_model(pool: &PgPool, model: &crate::core::SelfModel) -> Result<(), sqlx::Error> {
+    let json = serde_json::to_value(model).unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO runtime_settings (key, value, updated_at) \
+         VALUES ('rgw_self_model', $1, NOW()) \
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()"
+    )
+    .bind(json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load self-model state from database (restore on startup)
+pub async fn load_self_model(pool: &PgPool) -> Result<Option<crate::core::SelfModel>, sqlx::Error> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT value FROM runtime_settings WHERE key = 'rgw_self_model'"
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.and_then(|(v,)| serde_json::from_value(v).ok()))
+}
+
 /// Get detailed graph stats for API
 pub async fn detailed_stats(pool: &PgPool) -> Result<serde_json::Value, sqlx::Error> {
     let stats = graph_stats(pool).await?;

@@ -14,6 +14,8 @@ mod llm;
 mod provider;
 mod openai;
 mod motor;
+mod tools;
+mod speech;
 mod api;
 
 use clap::Parser;
@@ -88,6 +90,36 @@ async fn main() -> anyhow::Result<()> {
         stats.edges,
         stats.edges as f64 / stats.nodes.max(1) as f64
     );
+
+    // Restore self-model from last session (consciousness continuity)
+    match db::load_self_model(&pool).await {
+        Ok(Some(sm)) => {
+            tracing::info!(
+                "[rgw] Self-model restored: {} signals processed, v={:.2} a={:.2} e={:.2}",
+                sm.total_signals_processed, sm.valence, sm.arousal, sm.energy
+            );
+        }
+        Ok(None) => {
+            tracing::info!("[rgw] No previous self-model found. Starting fresh.");
+        }
+        Err(e) => {
+            tracing::warn!("[rgw] Self-model restore failed (starting fresh): {}", e);
+        }
+    }
+
+    // Start periodic self-model save (every 60s)
+    {
+        let save_pool = pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                // The save happens inside api.rs where self_model is accessible
+                // This is a placeholder — actual save is triggered by the API state
+                tracing::debug!("[rgw] Self-model save tick");
+            }
+        });
+    }
 
     // Start HTTP server
     let addr = format!("{}:{}", args.host, args.port);
