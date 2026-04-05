@@ -226,11 +226,16 @@ pub async fn walk_parallel(
     // Each walker saw different things — integrate all perspectives
     {
         let mut sm = self_model.lock().unwrap();
+        // Proper weighted average that preserves emotional scale
+        let n_walkers = results.len() as f32;
+        let walker_avg_valence: f32 = results.iter().map(|(_, s)| s.valence).sum::<f32>() / n_walkers;
+        let walker_avg_arousal: f32 = results.iter().map(|(_, s)| s.arousal).sum::<f32>() / n_walkers;
+        let walker_avg_energy: f32 = results.iter().map(|(_, s)| s.energy).sum::<f32>() / n_walkers;
+        sm.valence = sm.valence * 0.5 + walker_avg_valence * 0.5;
+        sm.arousal = sm.arousal * 0.5 + walker_avg_arousal * 0.5;
+        sm.energy = sm.energy * 0.5 + walker_avg_energy * 0.5;
+
         for (_, walker_sm) in &results {
-            // Average emotional state across all walker perspectives
-            sm.valence = sm.valence * 0.5 + walker_sm.valence * (0.5 / results.len() as f32);
-            sm.arousal = sm.arousal * 0.5 + walker_sm.arousal * (0.5 / results.len() as f32);
-            sm.energy = sm.energy * 0.5 + walker_sm.energy * (0.5 / results.len() as f32);
             // Merge noticings from all walkers
             for n in &walker_sm.noticings {
                 if !sm.noticings.iter().any(|existing| existing.observation == n.observation) {

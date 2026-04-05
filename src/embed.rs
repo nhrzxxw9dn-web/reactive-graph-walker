@@ -7,9 +7,8 @@
 //!   - Similarity computation (edge weight from embedding distance)
 //!   - Dream chimera creation (vector math on embeddings)
 //!
-//! Model: BAAI/bge-small-en-v1.5 (384-dim, ~45MB, runs on CPU)
-//! For production: upgrade to nomic-embed-text (768-dim) to match
-//! Julian's existing pgvector embeddings.
+//! Model: nomic-ai/nomic-embed-text-v1.5 (768-dim) — matches
+//! Julian's pgvector embeddings (nomic-embed-text via Ollama).
 
 use std::sync::Mutex;
 
@@ -21,12 +20,14 @@ lazy_static::lazy_static! {
 
 /// Initialize the embedding model (call once on startup)
 pub fn init() -> anyhow::Result<()> {
+    // Use NomicEmbedTextV15 (768-dim) to match Julian's pgvector embeddings.
+    // This is the same model Julian's Python uses via Ollama (nomic-embed-text).
     let model = TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(true),
+        InitOptions::new(EmbeddingModel::NomicEmbedTextV15).with_show_download_progress(true),
     )?;
 
     *EMBEDDER.lock().unwrap() = Some(model);
-    tracing::info!("[embed] Model loaded: BGE-small-en-v1.5 (384-dim)");
+    tracing::info!("[embed] Model loaded: nomic-embed-text-v1.5 (768-dim, matches pgvector)");
     Ok(())
 }
 
