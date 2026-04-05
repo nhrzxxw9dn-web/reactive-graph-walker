@@ -108,7 +108,7 @@ import torch
 from audiocraft.models import MusicGen
 from audiocraft.data.audio import audio_write
 
-model = MusicGen.get_pretrained('facebook/musicgen-small')
+model = MusicGen.get_pretrained('facebook/musicgen-large')
 model.set_generation_params(duration={duration})
 
 wav = model.generate(['{prompt}'])
