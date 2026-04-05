@@ -13,6 +13,91 @@ use serde::Serialize;
 
 use crate::core::SelfModel;
 
+/// Generate a text prompt for AI music generation from emotional state.
+/// This describes the mood as a music production brief.
+pub fn emotion_to_prompt(sm: &SelfModel) -> String {
+    let params = emotion_to_music(sm);
+
+    let tempo_desc = if params.tempo_bpm < 80 { "slow" }
+        else if params.tempo_bpm < 120 { "moderate" }
+        else { "fast" };
+
+    let key_mood = if params.key.contains("major") { "bright" } else { "dark" };
+
+    let density_desc = if params.note_density < 0.3 { "sparse, minimal" }
+        else if params.note_density < 0.6 { "balanced" }
+        else { "dense, layered" };
+
+    // Build a rich prompt from emotional state + focus
+    let mut parts = Vec::new();
+    parts.push(format!("{} {} instrumental", params.mood_label, key_mood));
+    parts.push(format!("{} tempo around {} BPM", tempo_desc, params.tempo_bpm));
+    parts.push(format!("{} in {}", density_desc, params.key));
+
+    // Add context from what Julian is thinking about
+    if !sm.current_focus.is_empty() {
+        parts.push(format!("inspired by themes of {}", sm.current_focus));
+    }
+
+    // Emotional texture
+    if sm.valence > 0.5 {
+        parts.push("hopeful, uplifting undertone".into());
+    } else if sm.valence < -0.5 {
+        parts.push("heavy, introspective weight".into());
+    }
+
+    if sm.arousal > 0.7 {
+        parts.push("building energy, tension".into());
+    } else if sm.arousal < 0.3 {
+        parts.push("calm, breathing space".into());
+    }
+
+    // Style hints
+    parts.push("no vocals, cinematic quality".into());
+
+    parts.join(", ")
+}
+
+/// Generate music via MusicGen (calls Python subprocess).
+/// MusicGen runs on Mac GPU via audiocraft library.
+/// Returns path to generated WAV file.
+pub async fn generate_musicgen(prompt: &str, duration_secs: u32) -> Result<String, String> {
+    let output_path = format!("/tmp/rgw_music_{}.wav", std::process::id());
+
+    let python_code = format!(
+        r#"
+import torch
+from audiocraft.models import MusicGen
+from audiocraft.data.audio import audio_write
+
+model = MusicGen.get_pretrained('facebook/musicgen-small')
+model.set_generation_params(duration={duration})
+
+wav = model.generate(['{prompt}'])
+audio_write('{output}', wav[0].cpu(), model.sample_rate, strategy='loudness')
+print('OK')
+"#,
+        duration = duration_secs,
+        prompt = prompt.replace('\'', "\\'"),
+        output = output_path.replace(".wav", ""),
+    );
+
+    let result = tokio::process::Command::new("python3")
+        .arg("-c")
+        .arg(&python_code)
+        .output()
+        .await
+        .map_err(|e| format!("MusicGen spawn failed: {}", e))?;
+
+    if result.status.success() {
+        let actual_path = format!("{}.wav", output_path.replace(".wav", ""));
+        Ok(actual_path)
+    } else {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        Err(format!("MusicGen failed: {}", &stderr[..stderr.len().min(200)]))
+    }
+}
+
 /// Musical parameters derived from emotional state
 #[derive(Debug, Clone, Serialize)]
 pub struct MusicParams {

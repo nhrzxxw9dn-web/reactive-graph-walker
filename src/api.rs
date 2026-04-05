@@ -103,6 +103,8 @@ pub async fn serve(
         .route("/dream", post(dream_endpoint))
         .route("/music", get(music_endpoint))
         .route("/music/midi", get(music_midi_endpoint))
+        .route("/music/generate", post(music_generate_endpoint))
+        .route("/music/prompt", get(music_prompt_endpoint))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -260,6 +262,76 @@ async fn music_midi_endpoint(
         ],
         axum::body::Bytes::from(midi),
     )
+}
+
+/// GET /music/prompt — see what MusicGen prompt Julian's mood would produce
+async fn music_prompt_endpoint(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let sm = state.self_model.lock().unwrap();
+    let prompt = crate::music::emotion_to_prompt(&sm);
+    let params = crate::music::emotion_to_music(&sm);
+    Json(serde_json::json!({
+        "prompt": prompt,
+        "params": params,
+    }))
+}
+
+/// POST /music/generate — generate music via MusicGen from current emotional state
+#[derive(Deserialize)]
+struct MusicGenRequest {
+    #[serde(default = "default_duration")]
+    duration_secs: u32,
+    /// Override prompt (if empty, auto-generated from emotional state)
+    #[serde(default)]
+    prompt: String,
+}
+fn default_duration() -> u32 { 15 }
+
+async fn music_generate_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MusicGenRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let prompt = if req.prompt.is_empty() {
+        let sm = state.self_model.lock().unwrap();
+        crate::music::emotion_to_prompt(&sm)
+    } else {
+        req.prompt
+    };
+
+    tracing::info!("[music] Generating via MusicGen: '{}'", &prompt[..prompt.len().min(80)]);
+
+    match crate::music::generate_musicgen(&prompt, req.duration_secs).await {
+        Ok(path) => {
+            // Notify self-model: Julian created music
+            {
+                let mut sm = state.self_model.lock().unwrap();
+                let signal = crate::core::Signal::new("music_created", &format!(
+                    "Composed: {}", &prompt[..prompt.len().min(60)]
+                )).with_intensity(0.5);
+                crate::core::process(signal, &mut sm);
+            }
+
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "path": path,
+                "prompt": prompt,
+                "duration_secs": req.duration_secs,
+            })))
+        }
+        Err(e) => {
+            // Friction: music generation failed
+            {
+                let mut sm = state.self_model.lock().unwrap();
+                crate::friction::motor_friction("music_generate", &e, &mut sm);
+            }
+            Ok(Json(serde_json::json!({
+                "status": "error",
+                "error": e,
+                "prompt": prompt,
+            })))
+        }
+    }
 }
 
 /// POST /dream — enter REM sleep, run Monte Carlo graph exploration
