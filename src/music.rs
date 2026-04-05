@@ -104,6 +104,17 @@ pub async fn generate_musicgen(prompt: &str, duration_secs: u32) -> Result<Strin
 
     let python_code = format!(
         r#"
+import sys, os
+# Patch: make xformers optional (doesn't build on Apple Silicon)
+import importlib
+_orig_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+def _patched_import(name, *args, **kwargs):
+    if name == 'xformers' or name.startswith('xformers.'):
+        raise ImportError("xformers skipped on Apple Silicon")
+    return _orig_import(name, *args, **kwargs)
+import builtins
+builtins.__import__ = _patched_import
+
 import torch
 from audiocraft.models import MusicGen
 from audiocraft.data.audio import audio_write
@@ -111,16 +122,21 @@ from audiocraft.data.audio import audio_write
 model = MusicGen.get_pretrained('facebook/musicgen-large')
 model.set_generation_params(duration={duration})
 
-wav = model.generate(['{prompt}'])
+descriptions = ['{prompt}']
+wav = model.generate(descriptions)
 audio_write('{output}', wav[0].cpu(), model.sample_rate, strategy='loudness')
-print('OK')
+print('OK:' + '{output}.wav')
 "#,
         duration = duration_secs,
-        prompt = prompt.replace('\'', "\\'"),
+        prompt = prompt.replace('\'', "\\'").replace('\n', " "),
         output = output_path.replace(".wav", ""),
     );
 
-    let result = tokio::process::Command::new("python3")
+    // Use the MusicGen venv Python
+    let python = std::env::var("MUSICGEN_PYTHON")
+        .unwrap_or_else(|_| format!("{}/.venvs/musicgen/bin/python", std::env::var("HOME").unwrap_or_default()));
+
+    let result = tokio::process::Command::new(&python)
         .arg("-c")
         .arg(&python_code)
         .output()
