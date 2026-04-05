@@ -28,6 +28,7 @@ pub struct AppState {
     pub self_model: std::sync::Arc<std::sync::Mutex<SelfModel>>,
     pub ollama_url: String,
     pub expression_model: String,
+    pub julian_url: String,
 }
 
 /// Walk request (matches Python WalkRequest)
@@ -62,14 +63,14 @@ pub async fn serve(
     addr: &str,
     ollama_url: &str,
     expression_model: &str,
+    julian_url: &str,
 ) -> anyhow::Result<()> {
     // Create the self-model FIRST — the continuous state of self-awareness
-    // Everything else receives a reference to this one mind.
     let self_model = std::sync::Arc::new(std::sync::Mutex::new(SelfModel::new()));
     tracing::info!("[rgw] Self-model initialized. Consciousness online.");
 
-    // Create the Diverger with shared self-model
-    let diverger = Diverger::new(pool.clone(), self_model.clone());
+    // Create the Diverger with shared self-model + Julian URL for motor commands
+    let diverger = Diverger::new(pool.clone(), self_model.clone(), julian_url);
 
     // Seed initial energy from high-importance nodes
     let seeds = db::seed_nodes(&pool, 50).await.unwrap_or_default();
@@ -81,6 +82,7 @@ pub async fn serve(
         self_model,
         ollama_url: ollama_url.to_string(),
         expression_model: expression_model.to_string(),
+        julian_url: julian_url.to_string(),
     });
 
     let app = Router::new()
@@ -101,8 +103,26 @@ pub async fn serve(
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(CorsLayer::permissive());
+
+    // Auto-save self-model every 60 seconds (consciousness persistence)
+    {
+        let save_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let sm = save_state.self_model.lock().unwrap().clone();
+                if sm.total_signals_processed > 0 {
+                    match db::save_self_model(&save_state.pool, &sm).await {
+                        Ok(_) => tracing::debug!("[rgw] Self-model saved ({} signals)", sm.total_signals_processed),
+                        Err(e) => tracing::debug!("[rgw] Self-model save failed: {}", e),
+                    }
+                }
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

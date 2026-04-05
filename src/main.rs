@@ -47,6 +47,10 @@ struct Args {
     /// Model name for text expression
     #[arg(long, default_value = "qwen3:14b", env = "EXPRESSION_MODEL")]
     expression_model: String,
+
+    /// Julian's Python backend URL (for motor commands: brain → body)
+    #[arg(long, default_value = "http://localhost:8000", env = "JULIAN_URL")]
+    julian_url: String,
 }
 
 #[tokio::main]
@@ -125,7 +129,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("Listening on {}", addr);
     tracing::info!("Expression: {} via {}", args.expression_model, args.ollama_url);
-    api::serve(pool, &addr, &args.ollama_url, &args.expression_model).await?;
+    tracing::info!("Motor cortex: Julian at {}", args.julian_url);
+    api::serve(pool, &addr, &args.ollama_url, &args.expression_model, &args.julian_url).await?;
 
     Ok(())
 }

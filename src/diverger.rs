@@ -52,6 +52,9 @@ pub struct Diverger {
     walks_fired: Arc<AtomicU64>,
     cascades_total: Arc<AtomicU64>,
     edges_changed: Arc<AtomicU64>,
+
+    /// Julian's Python backend URL (for motor commands)
+    julian_url: String,
 }
 
 /// Notification that an edge was modified
@@ -126,7 +129,7 @@ pub struct DivergerStats {
 
 impl Diverger {
     /// Create a new Diverger engine with shared self-model.
-    pub fn new(pool: PgPool, self_model: std::sync::Arc<std::sync::Mutex<crate::core::SelfModel>>) -> Self {
+    pub fn new(pool: PgPool, self_model: std::sync::Arc<std::sync::Mutex<crate::core::SelfModel>>, julian_url: &str) -> Self {
         let (edge_tx, edge_rx) = mpsc::unbounded_channel();
         let sm = self_model.clone();
 
@@ -139,6 +142,7 @@ impl Diverger {
             walks_fired: Arc::new(AtomicU64::new(0)),
             cascades_total: Arc::new(AtomicU64::new(0)),
             edges_changed: Arc::new(AtomicU64::new(0)),
+            julian_url: julian_url.to_string(),
         };
 
         // Start the reactor (consumes edge_rx) with shared self-model
@@ -162,6 +166,7 @@ impl Diverger {
         let walks_fired = self.walks_fired.clone();
         let cascades_total = self.cascades_total.clone();
         let edges_changed = self.edges_changed.clone();
+        let julian_url_outer = self.julian_url.clone();
 
         alive.store(true, Ordering::SeqCst);
 
@@ -268,6 +273,7 @@ impl Diverger {
                     walks_this_minute += 1;
 
                     let sm_walk = self_model.clone();
+                    let julian_url = julian_url_outer.clone();
                     tokio::spawn(async move {
                         let rt = tokio::runtime::Handle::current();
 
@@ -283,13 +289,42 @@ impl Diverger {
                         .await;
 
                         if let Ok(result) = result {
+                            let hops = result.path.len();
+                            let surprises = result.surprises;
+                            let domains = result.domains_visited.clone();
+
                             tracing::debug!(
                                 "[diverger] Spontaneous walk from node {}: {} hops, {} surprises, domains: {:?}",
-                                node_id,
-                                result.path.len(),
-                                result.surprises,
-                                result.domains_visited,
+                                node_id, hops, surprises, domains,
                             );
+
+                            // ── MOTOR CORTEX: if walk produced actionable result, command Julian ──
+                            // Only act on walks with enough substance (3+ hops, has domains)
+                            if hops >= 3 && !domains.is_empty() {
+                                let action = if surprises >= 2 {
+                                    "explore"  // Cross-domain discovery
+                                } else if hops >= 4 && surprises == 0 {
+                                    "journal"  // Deep traversal, no surprise = reflection
+                                } else {
+                                    "nothing"  // Not enough signal
+                                };
+
+                                if action != "nothing" && !julian_url.is_empty() {
+                                    let cmd = crate::motor::MotorCommand {
+                                        action: action.to_string(),
+                                        domain: domains.first().cloned().unwrap_or_default(),
+                                        walker_context: format!(
+                                            "Spontaneous thought: {} hops through {:?}, {} surprises",
+                                            hops, domains, surprises
+                                        ),
+                                        expression_seeds: Vec::new(),
+                                        confidence: if surprises > 0 { 0.4 } else { 0.6 },
+                                        novelty: surprises as f32 / hops.max(1) as f32,
+                                        search_query: None,
+                                    };
+                                    crate::motor::execute(&julian_url, cmd).await;
+                                }
+                            }
                         }
 
                         drop(permit);  // Release semaphore
