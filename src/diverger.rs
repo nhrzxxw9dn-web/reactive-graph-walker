@@ -84,17 +84,29 @@ pub struct DivergerConfig {
 
     /// Minimum time between fires at same node (seconds)
     pub refractory_period: f64,
+
+    /// Max edge changes processed per second (circuit breaker for runaway cascades)
+    pub max_edges_per_second: u32,
+
+    /// Max total walks fired per minute (global budget)
+    pub max_walks_per_minute: u32,
+
+    /// Propagation depth limit (how many cascade hops before stopping)
+    pub max_cascade_depth: u32,
 }
 
 impl Default for DivergerConfig {
     fn default() -> Self {
         Self {
             base_threshold: 0.5,
-            energy_decay_rate: 0.01,     // Lose 0.01 energy per second
+            energy_decay_rate: 0.01,
             max_concurrent_walks: 8,
             walk_steps: 5,
-            propagation_strength: 0.3,   // 30% of edge delta becomes neighbor energy
-            refractory_period: 0.5,      // 500ms between fires at same node
+            propagation_strength: 0.3,
+            refractory_period: 0.5,
+            max_edges_per_second: 100,    // Hard cap: 100 edge changes/sec
+            max_walks_per_minute: 60,     // Hard cap: 1 walk/sec average
+            max_cascade_depth: 3,         // Max 3 hops of propagation
         }
     }
 }
@@ -156,11 +168,32 @@ impl Diverger {
 
             tracing::info!("[diverger] Reactor started. Waiting for edge changes...");
 
+            // Circuit breaker state
+            let mut edges_this_second: u32 = 0;
+            let mut walks_this_minute: u32 = 0;
+            let mut last_second_reset = std::time::Instant::now();
+            let mut last_minute_reset = std::time::Instant::now();
+
             // This is NOT a polling loop.
             // It awaits on the channel — zero CPU when nothing changes.
             // Each edge change cascades to neighbors, potentially firing walks.
             while let Some(change) = edge_rx.recv().await {
                 edges_changed.fetch_add(1, Ordering::Relaxed);
+
+                // ── Circuit breaker: rate limiting ──
+                let now_instant = std::time::Instant::now();
+                if now_instant.duration_since(last_second_reset).as_secs_f64() >= 1.0 {
+                    edges_this_second = 0;
+                    last_second_reset = now_instant;
+                }
+                if now_instant.duration_since(last_minute_reset).as_secs_f64() >= 60.0 {
+                    walks_this_minute = 0;
+                    last_minute_reset = now_instant;
+                }
+                edges_this_second += 1;
+                if edges_this_second > config.max_edges_per_second {
+                    continue; // Drop — too many edges this second
+                }
 
                 // Get current emotional state for threshold modulation
                 let emo = emotion.read().await.clone();
@@ -211,6 +244,12 @@ impl Diverger {
 
                 // Fire spontaneous walks from nodes that crossed threshold
                 for node_id in nodes_to_fire {
+                    // Walk budget check (circuit breaker)
+                    if walks_this_minute >= config.max_walks_per_minute {
+                        tracing::debug!("[diverger] Walk budget exhausted ({}/min) — throttling", config.max_walks_per_minute);
+                        break;
+                    }
+
                     let permit = match walk_semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => continue,  // Too many concurrent walks — skip
@@ -224,6 +263,7 @@ impl Diverger {
 
                     walks_count.fetch_add(1, Ordering::Relaxed);
                     cascade_count.fetch_add(1, Ordering::Relaxed);
+                    walks_this_minute += 1;
 
                     tokio::spawn(async move {
                         let rt = tokio::runtime::Handle::current();
