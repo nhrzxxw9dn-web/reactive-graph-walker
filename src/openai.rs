@@ -156,6 +156,7 @@ pub async fn chat_completions(
         &emotion,
         req.rgw_walkers,
         req.rgw_steps,
+        &state.self_model,
     )
     .await;
 

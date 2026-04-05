@@ -125,9 +125,10 @@ pub struct DivergerStats {
 }
 
 impl Diverger {
-    /// Create a new Diverger engine.
-    pub fn new(pool: PgPool) -> Self {
+    /// Create a new Diverger engine with shared self-model.
+    pub fn new(pool: PgPool, self_model: std::sync::Arc<std::sync::Mutex<crate::core::SelfModel>>) -> Self {
         let (edge_tx, edge_rx) = mpsc::unbounded_channel();
+        let sm = self_model.clone();
 
         let diverger = Self {
             pool,
@@ -140,8 +141,8 @@ impl Diverger {
             edges_changed: Arc::new(AtomicU64::new(0)),
         };
 
-        // Start the reactor (consumes edge_rx)
-        diverger.start_reactor(edge_rx, DivergerConfig::default());
+        // Start the reactor (consumes edge_rx) with shared self-model
+        diverger.start_reactor(edge_rx, DivergerConfig::default(), sm);
 
         diverger
     }
@@ -152,6 +153,7 @@ impl Diverger {
         &self,
         mut edge_rx: mpsc::UnboundedReceiver<EdgeChange>,
         config: DivergerConfig,
+        self_model: std::sync::Arc<std::sync::Mutex<crate::core::SelfModel>>,
     ) {
         let pool = self.pool.clone();
         let nodes = self.nodes.clone();
@@ -265,16 +267,17 @@ impl Diverger {
                     cascade_count.fetch_add(1, Ordering::Relaxed);
                     walks_this_minute += 1;
 
+                    let sm_walk = self_model.clone();
                     tokio::spawn(async move {
                         let rt = tokio::runtime::Handle::current();
 
                         // Fire the walk on a rayon thread (true parallelism)
                         let result = tokio::task::spawn_blocking(move || {
+                            let mut sm = sm_walk.lock().unwrap().clone();
                             crate::walker::walk_single(
                                 &pool, node_id,
-                                // Rotate bias based on node_id
                                 WalkerBias::all()[node_id as usize % WalkerBias::all().len()],
-                                &emo, steps, &rt,
+                                &emo, steps, &rt, &mut sm,
                             )
                         })
                         .await;

@@ -11,6 +11,7 @@ use rand::Rng;
 use rayon::prelude::*;
 use sqlx::PgPool;
 
+use crate::core::{self, Signal, SelfModel, Noticing};
 use crate::db;
 use crate::graph::*;
 
@@ -22,6 +23,7 @@ pub fn walk_single(
     emotion: &EmotionalState,
     steps: usize,
     rt: &tokio::runtime::Handle,
+    self_model: &mut SelfModel,
 ) -> WalkerResult {
     let mut result = WalkerResult {
         bias,
@@ -34,12 +36,17 @@ pub fn walk_single(
         edges_traversed: Vec::new(),
     };
 
+    // Signal the self-model: walk is starting
+    let start_signal = Signal::new("walk_start", &format!("Walking from node {} with {:?} bias", seed_id, bias))
+        .with_intensity(0.3);
+    core::process(start_signal, self_model);
+
     let mut current_id = seed_id;
     let mut rng = rand::rng();
     let mut prev_domain = String::new();
 
-    for _ in 0..steps {
-        // Get edges from current node (blocking call from sync rayon thread)
+    for step in 0..steps {
+        // Get edges from current node
         let edges = match rt.block_on(db::edges_from(pool, current_id)) {
             Ok(e) => e,
             Err(_) => {
@@ -50,10 +57,22 @@ pub fn walk_single(
 
         if edges.is_empty() {
             result.dead_ends += 1;
+            // Self-model notices: dead end
+            let signal = Signal::new("dead_end", &format!("No edges from node {}", current_id))
+                .with_intensity(0.2);
+            core::process(signal, self_model);
             break;
         }
 
-        // Score each edge based on bias + emotional state
+        // Score each edge — the self-model's state influences scoring
+        // through the emotion it carries (wounds boost threat edges,
+        // competencies boost familiar edges)
+        let current_emotion = EmotionalState {
+            valence: self_model.valence,
+            arousal: self_model.arousal,
+            energy: self_model.energy,
+        };
+
         let scored: Vec<(&db::MemoryEdge, f32)> = edges
             .iter()
             .map(|e| {
@@ -62,13 +81,13 @@ pub fn walk_single(
                     e.weight,
                     e.emotional_charge,
                     e.traversal_count,
-                    emotion,
+                    &current_emotion,  // Use self-model's emotion, not static input
                 );
                 (e, score)
             })
             .collect();
 
-        // Weighted random selection (not argmax — allows surprise)
+        // Weighted random selection
         let total: f32 = scored.iter().map(|(_, s)| s).sum();
         if total < f32::EPSILON {
             result.dead_ends += 1;
@@ -87,8 +106,6 @@ pub fn walk_single(
         }
 
         let edge = chosen.0;
-
-        // Determine next node (bidirectional traversal)
         let next_id = if edge.source_id == current_id {
             edge.target_id
         } else {
@@ -101,15 +118,33 @@ pub fn walk_single(
         result.total_weight += edge.weight;
         result.edges_traversed.push(edge.id);
 
-        // Track domain transitions
+        // Track domain transitions + feed through self-model
         if let Ok(Some(node)) = rt.block_on(db::get_node(pool, next_id)) {
             if !node.domain.is_empty() {
-                if !prev_domain.is_empty() && prev_domain != node.domain {
+                let is_surprise = !prev_domain.is_empty() && prev_domain != node.domain;
+                if is_surprise {
                     result.surprises += 1;
                 }
                 if !result.domains_visited.contains(&node.domain) {
                     result.domains_visited.push(node.domain.clone());
                 }
+
+                // ── EVERY STEP PASSES THROUGH THE SELF-MODEL ──
+                let signal_kind = if is_surprise { "surprise" } else { "walk_step" };
+                let signal = Signal::new(
+                    signal_kind,
+                    &format!("Step {}: {} → {} via {} edge (w={:.2})",
+                        step, prev_domain, node.domain, edge.edge_type, edge.weight),
+                )
+                .with_domain(&node.domain)
+                .with_intensity(if is_surprise { 0.6 } else { 0.2 });
+
+                core::process(signal, self_model);
+                // The self-model just changed. The next step's edge scoring
+                // will be different because the self-model is different.
+                // THIS IS COGNITION: the walk changes the thinker,
+                // the changed thinker changes the walk.
+
                 prev_domain = node.domain;
             }
         }
@@ -117,17 +152,34 @@ pub fn walk_single(
         current_id = next_id;
     }
 
+    // Signal the self-model: walk complete
+    let end_signal = Signal::new("walk_end", &format!(
+        "Walk complete: {} hops, {} surprises, domains: {:?}",
+        result.path.len(), result.surprises, result.domains_visited
+    )).with_intensity(0.4);
+    core::process(end_signal, self_model);
+
     result
 }
 
 /// Run multiple walkers in parallel and aggregate results.
+/// The shared self-model is passed in — all walkers feed it.
 pub async fn walk_parallel(
     pool: &PgPool,
     emotion: &EmotionalState,
     n_walkers: usize,
     steps: usize,
+    self_model: &std::sync::Arc<std::sync::Mutex<SelfModel>>,
 ) -> WalkOutput {
     let start = Instant::now();
+
+    // Signal: walk session starting
+    {
+        let mut sm = self_model.lock().unwrap();
+        let signal = Signal::new("session_start", &format!("Launching {} walkers", n_walkers))
+            .with_intensity(0.4);
+        core::process(signal, &mut sm);
+    }
 
     // Get seed nodes
     let seeds = db::seed_nodes(pool, (n_walkers * 2) as i32)
@@ -138,7 +190,7 @@ pub async fn walk_parallel(
         return empty_output();
     }
 
-    // Assign biases — rotate through available biases
+    // Assign biases
     let biases = WalkerBias::all();
     let configs: Vec<(i32, WalkerBias)> = (0..n_walkers)
         .map(|i| {
@@ -148,23 +200,63 @@ pub async fn walk_parallel(
         })
         .collect();
 
-    // Clone what we need for the rayon threads
     let pool_clone = pool.clone();
-    let emotion_clone = emotion.clone();
     let rt = tokio::runtime::Handle::current();
 
-    // Run walkers in parallel via rayon
+    // Clone self-model per walker (parallel perspectives, integrate after)
+    // Like the brain: process in parallel, integrate in global workspace
+    let base_sm = self_model.lock().unwrap().clone();
+
     let walk_start = Instant::now();
-    let results: Vec<WalkerResult> = configs
+    let results: Vec<(WalkerResult, SelfModel)> = configs
         .par_iter()
         .map(|(seed, bias)| {
-            walk_single(&pool_clone, *seed, *bias, &emotion_clone, steps, &rt)
+            let mut sm = base_sm.clone();  // Each walker gets its own copy
+            let result = walk_single(&pool_clone, *seed, *bias, &EmotionalState {
+                valence: sm.valence,
+                arousal: sm.arousal,
+                energy: sm.energy,
+            }, steps, &rt, &mut sm);
+            (result, sm)
         })
         .collect();
     let walk_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
 
+    // Merge per-walker self-models back into the shared self-model
+    // Each walker saw different things — integrate all perspectives
+    {
+        let mut sm = self_model.lock().unwrap();
+        for (_, walker_sm) in &results {
+            // Average emotional state across all walker perspectives
+            sm.valence = sm.valence * 0.5 + walker_sm.valence * (0.5 / results.len() as f32);
+            sm.arousal = sm.arousal * 0.5 + walker_sm.arousal * (0.5 / results.len() as f32);
+            sm.energy = sm.energy * 0.5 + walker_sm.energy * (0.5 / results.len() as f32);
+            // Merge noticings from all walkers
+            for n in &walker_sm.noticings {
+                if !sm.noticings.iter().any(|existing| existing.observation == n.observation) {
+                    sm.noticings.push(n.clone());
+                }
+            }
+            // Merge attention patterns
+            for (domain, &count) in &walker_sm.attention_patterns {
+                *sm.attention_patterns.entry(domain.clone()).or_insert(0.0) += count;
+            }
+        }
+        sm.total_signals_processed += results.iter().map(|(_, s)| s.total_signals_processed).sum::<u64>();
+
+        // Signal: integration complete
+        let signal = crate::core::Signal::new("integration", &format!(
+            "Integrated {} walker perspectives",
+            results.len()
+        )).with_intensity(0.3);
+        crate::core::process(signal, &mut sm);
+    }
+
+    // Extract just the walker results for aggregation
+    let walker_results: Vec<WalkerResult> = results.into_iter().map(|(r, _)| r).collect();
+
     // Aggregate results
-    let output = aggregate(pool, results, walk_ms, start).await;
+    let output = aggregate(pool, walker_results, walk_ms, start).await;
 
     // Batch strengthen traversed edges (the walk changes the graph)
     let all_edge_ids: Vec<i32> = output

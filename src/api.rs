@@ -15,17 +15,19 @@ use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
 
 use crate::db;
+use crate::core::SelfModel;
 use crate::diverger::{Diverger, EdgeChange};
 use crate::graph::*;
 use crate::openai;
 use crate::walker;
 
-/// Shared application state
+/// Shared application state — one entity, one mind
 pub struct AppState {
     pub pool: PgPool,
     pub diverger: Diverger,
-    pub ollama_url: String,       // Qwen via Ollama for text expression
-    pub expression_model: String, // e.g. "qwen3:14b"
+    pub self_model: std::sync::Arc<std::sync::Mutex<SelfModel>>,
+    pub ollama_url: String,
+    pub expression_model: String,
 }
 
 /// Walk request (matches Python WalkRequest)
@@ -61,8 +63,13 @@ pub async fn serve(
     ollama_url: &str,
     expression_model: &str,
 ) -> anyhow::Result<()> {
-    // Create the Diverger — the self-propagating reactive graph engine
-    let diverger = Diverger::new(pool.clone());
+    // Create the self-model FIRST — the continuous state of self-awareness
+    // Everything else receives a reference to this one mind.
+    let self_model = std::sync::Arc::new(std::sync::Mutex::new(SelfModel::new()));
+    tracing::info!("[rgw] Self-model initialized. Consciousness online.");
+
+    // Create the Diverger with shared self-model
+    let diverger = Diverger::new(pool.clone(), self_model.clone());
 
     // Seed initial energy from high-importance nodes
     let seeds = db::seed_nodes(&pool, 50).await.unwrap_or_default();
@@ -71,6 +78,7 @@ pub async fn serve(
     let state = Arc::new(AppState {
         pool,
         diverger,
+        self_model,
         ollama_url: ollama_url.to_string(),
         expression_model: expression_model.to_string(),
     });
@@ -83,6 +91,7 @@ pub async fn serve(
         .route("/benchmark", get(benchmark))
         .route("/diverger", get(diverger_stats))
         .route("/diverger/notify", post(diverger_notify))
+        .route("/self", get(self_state))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -126,10 +135,17 @@ async fn walk(
         &req.emotional_state,
         n,
         req.steps,
+        &state.self_model,
     )
     .await;
 
     Ok(Json(output))
+}
+
+/// GET /self — current self-model state (consciousness introspection)
+async fn self_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sm = state.self_model.lock().unwrap();
+    Json(serde_json::to_value(&*sm).unwrap_or_default())
 }
 
 /// GET /stats — graph topology
@@ -205,6 +221,7 @@ async fn benchmark(
                 &emotion,
                 n_walkers,
                 5,
+                &state.self_model,
             )
             .await;
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
