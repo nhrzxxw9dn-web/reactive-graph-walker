@@ -17,12 +17,15 @@ use tower_http::cors::CorsLayer;
 use crate::db;
 use crate::diverger::{Diverger, EdgeChange};
 use crate::graph::*;
+use crate::openai;
 use crate::walker;
 
 /// Shared application state
 pub struct AppState {
     pub pool: PgPool,
     pub diverger: Diverger,
+    pub ollama_url: String,       // Qwen via Ollama for text expression
+    pub expression_model: String, // e.g. "qwen3:14b"
 }
 
 /// Walk request (matches Python WalkRequest)
@@ -52,7 +55,12 @@ pub struct HealthResponse {
 }
 
 /// Start the HTTP server with the Diverger engine
-pub async fn serve(pool: PgPool, addr: &str) -> anyhow::Result<()> {
+pub async fn serve(
+    pool: PgPool,
+    addr: &str,
+    ollama_url: &str,
+    expression_model: &str,
+) -> anyhow::Result<()> {
     // Create the Diverger — the self-propagating reactive graph engine
     let diverger = Diverger::new(pool.clone());
 
@@ -60,15 +68,24 @@ pub async fn serve(pool: PgPool, addr: &str) -> anyhow::Result<()> {
     let seeds = db::seed_nodes(&pool, 50).await.unwrap_or_default();
     diverger.seed_energy(seeds, 0.3).await;
 
-    let state = Arc::new(AppState { pool, diverger });
+    let state = Arc::new(AppState {
+        pool,
+        diverger,
+        ollama_url: ollama_url.to_string(),
+        expression_model: expression_model.to_string(),
+    });
 
     let app = Router::new()
+        // RGW native endpoints
         .route("/health", get(health))
         .route("/walk", post(walk))
         .route("/stats", get(stats))
         .route("/benchmark", get(benchmark))
         .route("/diverger", get(diverger_stats))
         .route("/diverger/notify", post(diverger_notify))
+        // OpenAI-compatible endpoints (drop-in replacement for Ollama)
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/models", get(openai::list_models))
         .with_state(state)
         .layer(CorsLayer::permissive());
 

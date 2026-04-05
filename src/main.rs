@@ -1,21 +1,24 @@
-//! Julian Walker — parallel graph traversal cognitive engine.
+//! RGW — Reactive Graph Walker.
 //!
-//! Replaces LLM-based decision-making with emotionally-biased graph walking.
-//! Multiple walkers traverse the memory graph simultaneously on separate cores.
-//! Convergence = confidence. Divergence = novelty.
-//! The walk changes the graph. The graph IS the mind.
+//! Self-propagating cognitive engine. The graph drives its own computation
+//! through cascading edge activation. No loops. No timers. No ticks.
+//! Parallel walkers with emotional biasing. Convergence = confidence.
+//! Divergence = novelty. The walk changes the graph. The graph IS the mind.
 
 mod db;
 mod graph;
 mod walker;
 mod diverger;
+mod llm;
+mod provider;
+mod openai;
 mod api;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "julian-walker", about = "Julian's cognitive engine")]
+#[command(name = "rgw", about = "RGW — Reactive Graph Walker")]
 struct Args {
     /// PostgreSQL connection string
     #[arg(long, env = "DATABASE_URL")]
@@ -32,6 +35,14 @@ struct Args {
     /// Number of walker threads (0 = auto-detect cores)
     #[arg(long, default_value = "0", env = "WALKER_THREADS")]
     threads: usize,
+
+    /// Ollama URL for text expression (Qwen)
+    #[arg(long, default_value = "http://localhost:11434", env = "OLLAMA_URL")]
+    ollama_url: String,
+
+    /// Model name for text expression
+    #[arg(long, default_value = "qwen3:14b", env = "EXPRESSION_MODEL")]
+    expression_model: String,
 }
 
 #[tokio::main]
@@ -58,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         .ok();
 
     tracing::info!(
-        "Julian Walker starting — {} threads, port {}",
+        "RGW starting — {} threads, port {}",
         threads,
         args.port
     );
@@ -79,7 +90,8 @@ async fn main() -> anyhow::Result<()> {
     // Start HTTP server
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("Listening on {}", addr);
-    api::serve(pool, &addr).await?;
+    tracing::info!("Expression: {} via {}", args.expression_model, args.ollama_url);
+    api::serve(pool, &addr, &args.ollama_url, &args.expression_model).await?;
 
     Ok(())
 }
