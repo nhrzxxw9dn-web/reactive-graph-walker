@@ -100,6 +100,7 @@ pub async fn serve(
         .route("/tools", get(list_tools))
         .route("/tools/execute", post(execute_tool_endpoint))
         .route("/speak", post(speak_endpoint))
+        .route("/dream", post(dream_endpoint))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -231,6 +232,15 @@ async fn speak_endpoint(
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
+}
+
+/// POST /dream — enter REM sleep, run Monte Carlo graph exploration
+async fn dream_endpoint(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::dream::DreamReport> {
+    let config = crate::dream::DreamConfig::default();
+    let report = crate::dream::dream(&state.pool, &state.self_model, config).await;
+    Json(report)
 }
 
 /// GET /stats — graph topology

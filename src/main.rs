@@ -15,6 +15,7 @@ mod llm;
 mod provider;
 mod openai;
 mod motor;
+mod dream;
 mod tools;
 mod speech;
 mod api;
