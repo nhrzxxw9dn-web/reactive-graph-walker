@@ -1,8 +1,8 @@
 [package]
-name = "julian-walker"
+name = "rgw"
 version = "0.1.0"
 edition = "2024"
-description = "Julian's cognitive engine — parallel graph traversal for the unified graph model"
+description = "RGW — Reactive Graph Walker. Self-propagating cognitive engine."
 
 [dependencies]
 # HTTP server
@@ -27,6 +27,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0.102"
+reqwest = { version = "0.13.2", features = ["json"] }
 
 [profile.release]
 opt-level = 3
