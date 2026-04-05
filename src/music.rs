@@ -53,7 +53,45 @@ pub fn emotion_to_prompt(sm: &SelfModel) -> String {
     }
 
     // Style hints
-    parts.push("no vocals, cinematic quality".into());
+    // Musical texture from self-model depth
+    if let Some(ref insight) = sm.latest_insight {
+        parts.push(format!("unexpected twist — {}", &insight[..insight.len().min(50)]));
+    }
+
+    // Tensions create dissonance
+    if !sm.wounds.is_empty() {
+        let worst_wound = sm.wounds.iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((domain, &severity)) = worst_wound {
+            if severity > 0.3 {
+                parts.push(format!("unresolved tension around {}, dissonant undertones", domain));
+            }
+        }
+    }
+
+    // Open questions create space/silence
+    if !sm.open_questions.is_empty() {
+        parts.push("moments of silence and searching".into());
+    }
+
+    // Beliefs create recurring themes
+    if !sm.beliefs.is_empty() {
+        parts.push("strong recurring motif representing conviction".into());
+    }
+
+    // Genre specificity based on domain
+    match sm.current_focus.as_str() {
+        "markets" => parts.push("electronic, synthetic textures, clock-like percussion".into()),
+        "philosophy" => parts.push("neo-classical piano with ambient drone".into()),
+        "travel" => parts.push("world music influences, organic instruments".into()),
+        "nature" => parts.push("field recordings, generative ambient, Brian Eno influence".into()),
+        "inner_life" => parts.push("intimate piano, Nils Frahm style, close-mic'd".into()),
+        "body" => parts.push("rhythmic, physical, tribal percussion elements".into()),
+        "technology" => parts.push("glitch, modular synthesis, Autechre influence".into()),
+        _ => parts.push("cinematic orchestral".into()),
+    }
+
+    parts.push("no vocals, high production quality".into());
 
     parts.join(", ")
 }
