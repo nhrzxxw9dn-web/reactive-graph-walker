@@ -118,11 +118,41 @@ pub struct SelfModel {
     /// Patterns detected from accumulated noticings
     pub emergent_patterns: Vec<EmergentPattern>,
 
+    // ── Semantic understanding (beyond counters) ──
+    /// Current thought embedding (384-dim, from last processed signal)
+    /// This IS what Julian is thinking about — a point in semantic space
+    pub thought_embedding: Option<Vec<f32>>,
+    /// Running average of recent thought embeddings (the "vibe")
+    /// Drifts slowly — represents what's been on Julian's mind lately
+    pub mind_centroid: Option<Vec<f32>>,
+    /// Most surprising connection found recently (two embeddings that shouldn't be similar)
+    pub latest_insight: Option<String>,
+    /// Beliefs: statements the self-model holds as true (from repeated noticings)
+    pub beliefs: Vec<Belief>,
+
+    // ── Relational awareness ──
+    /// Who has Julian interacted with recently
+    pub recent_interactions: Vec<String>,
+    /// What questions remain unanswered (from search gaps, dead ends)
+    pub open_questions: Vec<String>,
+
     // ── Meta: awareness of own state ──
     pub total_signals_processed: u64,
     pub total_noticings: u64,
     pub uptime: f64,
     pub started_at: f64,
+}
+
+/// A belief: something the self-model holds as true from repeated experience.
+/// Beliefs form when the same noticing pattern occurs 5+ times.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct Belief {
+    pub statement: String,
+    pub domain: String,
+    pub confidence: f32,      // 0-1: how sure (grows with evidence)
+    pub evidence_count: u32,  // how many noticings support this
+    pub first_formed: f64,
+    pub last_reinforced: f64,
 }
 
 /// A pattern that emerged from accumulated noticings.
@@ -161,6 +191,12 @@ impl SelfModel {
             last_noticing: String::new(),
             noticings: Vec::new(),
             emergent_patterns: Vec::new(),
+            thought_embedding: None,
+            mind_centroid: None,
+            latest_insight: None,
+            beliefs: Vec::new(),
+            recent_interactions: Vec::new(),
+            open_questions: Vec::new(),
             total_signals_processed: 0,
             total_noticings: 0,
             uptime: 0.0,
@@ -190,6 +226,63 @@ pub fn process(signal: Signal, self_model: &mut SelfModel) -> (Signal, Option<No
             .entry(signal.domain.clone())
             .or_insert(0.0);
         *count += signal.intensity;
+    }
+
+    // Embed the signal content (semantic understanding, not just counters)
+    if !signal.content.is_empty() && signal.content.len() > 10 {
+        if let Ok(emb) = crate::embed::embed_text(&signal.content) {
+            // Update thought embedding (what I'm thinking right now)
+            self_model.thought_embedding = Some(emb.clone());
+
+            // Update mind centroid (exponential moving average — the "vibe")
+            match &self_model.mind_centroid {
+                Some(centroid) if centroid.len() == emb.len() => {
+                    let alpha = 0.05; // Slow drift
+                    let new_centroid: Vec<f32> = centroid.iter()
+                        .zip(emb.iter())
+                        .map(|(c, e)| c * (1.0 - alpha) + e * alpha)
+                        .collect();
+                    self_model.mind_centroid = Some(new_centroid);
+                }
+                _ => {
+                    self_model.mind_centroid = Some(emb.clone());
+                }
+            }
+
+            // Detect insight: if signal embedding is very different from mind centroid
+            // (something unexpected just entered awareness)
+            if let Some(ref centroid) = self_model.mind_centroid {
+                let sim = crate::embed::cosine_similarity(&emb, centroid);
+                if sim < 0.3 && signal.intensity > 0.3 {
+                    self_model.latest_insight = Some(format!(
+                        "Unexpected: '{}' diverges from current mind-state (sim={:.2})",
+                        &signal.content[..signal.content.len().min(80)], sim
+                    ));
+                }
+            }
+        }
+    }
+
+    // Track open questions (from dead ends and search requests)
+    if signal.kind == "dead_end" || signal.kind == "search" {
+        let q = signal.content.clone();
+        if !self_model.open_questions.contains(&q) {
+            self_model.open_questions.push(q);
+            if self_model.open_questions.len() > 10 {
+                self_model.open_questions.remove(0);
+            }
+        }
+    }
+
+    // Track interactions
+    if signal.kind == "chat_message" || signal.kind.starts_with("social") {
+        let who = signal.content[..signal.content.len().min(40)].to_string();
+        if !self_model.recent_interactions.contains(&who) {
+            self_model.recent_interactions.push(who);
+            if self_model.recent_interactions.len() > 20 {
+                self_model.recent_interactions.remove(0);
+            }
+        }
     }
 
     // ── 2. The self-model INFLUENCES the signal ──
@@ -483,6 +576,50 @@ fn detect_patterns(sm: &mut SelfModel) {
         );
         sm.emergent_patterns.truncate(10);
     }
+
+    // Strong patterns → beliefs (understanding, not counting)
+    form_beliefs(sm);
+}
+
+// ── Belief Formation ────────────────────────────────────────────
+// Beliefs form when emergent patterns reach high strength.
+// This is understanding, not counting.
+
+fn form_beliefs(sm: &mut SelfModel) {
+    let now = now();
+
+    for pattern in &sm.emergent_patterns {
+        if pattern.strength < 0.5 || pattern.evidence_count < 5 {
+            continue;
+        }
+
+        // Check if belief already exists for this domain
+        if let Some(existing) = sm.beliefs.iter_mut().find(|b| b.domain == pattern.domain) {
+            // Reinforce existing belief
+            existing.confidence = (existing.confidence + 0.05).min(1.0);
+            existing.evidence_count += 1;
+            existing.last_reinforced = now;
+        } else if sm.beliefs.len() < 20 {
+            // Form new belief
+            sm.beliefs.push(Belief {
+                statement: pattern.description.clone(),
+                domain: pattern.domain.clone(),
+                confidence: pattern.strength * 0.5,
+                evidence_count: pattern.evidence_count,
+                first_formed: now,
+                last_reinforced: now,
+            });
+        }
+    }
+
+    // Decay old beliefs (not reinforced recently)
+    for belief in &mut sm.beliefs {
+        let age = now - belief.last_reinforced;
+        if age > 86400.0 {  // More than a day
+            belief.confidence -= 0.01;
+        }
+    }
+    sm.beliefs.retain(|b| b.confidence > 0.05);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────

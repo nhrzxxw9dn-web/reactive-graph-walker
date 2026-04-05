@@ -269,7 +269,7 @@ async fn web_search(params: serde_json::Value) -> ToolResult {
     }
 }
 
-/// Fetch a web page
+/// Fetch a web page and extract readable text (strips HTML)
 async fn web_fetch(params: serde_json::Value) -> ToolResult {
     let url = params["url"].as_str().unwrap_or("");
     if url.is_empty() {
@@ -281,7 +281,10 @@ async fn web_fetch(params: serde_json::Value) -> ToolResult {
         };
     }
 
-    match reqwest::Client::new()
+    match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; RGW/1.0)")
+        .build()
+        .unwrap()
         .get(url)
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -291,17 +294,18 @@ async fn web_fetch(params: serde_json::Value) -> ToolResult {
             let status = resp.status().as_u16();
             match resp.text().await {
                 Ok(body) => {
-                    // Truncate to first 2000 chars (graph nodes shouldn't be huge)
-                    let content = if body.len() > 2000 {
-                        format!("{}...", &body[..2000])
+                    // Extract readable text from HTML
+                    let content = extract_readable_text(&body);
+                    let content = if content.len() > 3000 {
+                        format!("{}...", &content[..3000])
                     } else {
-                        body
+                        content
                     };
                     ToolResult {
                         tool: "web_fetch".into(),
-                        success: status < 400,
+                        success: status < 400 && !content.is_empty(),
                         content,
-                        metadata: serde_json::json!({"url": url, "status": status}),
+                        metadata: serde_json::json!({"url": url, "status": status, "raw_len": body.len()}),
                     }
                 }
                 Err(e) => ToolResult {
@@ -319,6 +323,63 @@ async fn web_fetch(params: serde_json::Value) -> ToolResult {
             metadata: serde_json::json!({"url": url}),
         },
     }
+}
+
+/// Simple HTML → readable text extraction.
+/// Strips tags, scripts, styles, and collapses whitespace.
+fn extract_readable_text(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Remove script and style blocks entirely
+    while let Some(start) = text.find("<script") {
+        if let Some(end) = text[start..].find("</script>") {
+            text = format!("{}{}", &text[..start], &text[start + end + 9..]);
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = text.find("<style") {
+        if let Some(end) = text[start..].find("</style>") {
+            text = format!("{}{}", &text[..start], &text[start + end + 8..]);
+        } else {
+            break;
+        }
+    }
+
+    // Replace block elements with newlines
+    for tag in &["</p>", "</div>", "</h1>", "</h2>", "</h3>", "</h4>", "</li>", "<br", "</tr>"] {
+        text = text.replace(tag, &format!("\n{}", tag));
+    }
+
+    // Strip all remaining HTML tags
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+
+    // Decode common HTML entities
+    let result = result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+
+    // Collapse whitespace
+    let lines: Vec<String> = result
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    lines.join("\n")
 }
 
 /// Store a new memory node

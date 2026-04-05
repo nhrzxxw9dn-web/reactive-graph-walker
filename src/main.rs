@@ -6,6 +6,7 @@
 //! Divergence = novelty. The walk changes the graph. The graph IS the mind.
 
 mod core;
+mod embed;
 mod db;
 mod graph;
 mod walker;
@@ -81,6 +82,12 @@ async fn main() -> anyhow::Result<()> {
         threads,
         args.port
     );
+
+    // Initialize embedding model (runs on CPU, ~45MB download first time)
+    match embed::init() {
+        Ok(_) => tracing::info!("Embedding model ready"),
+        Err(e) => tracing::warn!("Embedding init failed (non-fatal): {}. Seed selection will use random.", e),
+    }
 
     // Connect to database
     let pool = db::connect(&args.db_url).await?;
