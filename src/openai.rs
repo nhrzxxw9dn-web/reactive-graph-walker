@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
 use crate::graph::EmotionalState;
-use crate::walker;
+use crate::walker::{self, format_walk_context};
 
 // ── OpenAI-compatible request/response types ────────────────────
 
@@ -162,7 +162,7 @@ pub async fn chat_completions(
     let walk_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
 
     // 3. Build enriched prompt for Qwen
-    let walker_context = crate::walker::format_walk_context(&walk_output);
+    let walker_context = format_walk_context(&walk_output);
     let enriched_prompt = format!(
         "{}\n\n{}\n\nUser: {}",
         walker_context,

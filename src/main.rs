@@ -5,6 +5,7 @@
 //! Parallel walkers with emotional biasing. Convergence = confidence.
 //! Divergence = novelty. The walk changes the graph. The graph IS the mind.
 
+mod core;
 mod db;
 mod graph;
 mod walker;

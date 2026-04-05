@@ -312,6 +312,42 @@ fn recommend_action(agreement: f32, novelty: f32, results: &[WalkerResult]) -> S
     }
 }
 
+/// Format walk output as context for LLM prompt injection.
+pub fn format_walk_context(output: &WalkOutput) -> String {
+    let mut lines = Vec::new();
+    lines.push("=== RGW COGNITION ===".to_string());
+    lines.push(format!("Action: {}", output.recommended_action));
+    lines.push(format!("Domain: {}", output.primary_domain));
+    lines.push(format!("Confidence: {:.0}%", output.agreement_score * 100.0));
+    lines.push(format!("Novelty: {:.0}%", output.novelty_score * 100.0));
+
+    if !output.domain_distribution.is_empty() {
+        let mut sorted: Vec<_> = output.domain_distribution.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let top: Vec<String> = sorted.iter().take(5).map(|(d, c)| format!("{}({})", d, c)).collect();
+        lines.push(format!("Landscape: {}", top.join(", ")));
+    }
+
+    if !output.expression_seeds.is_empty() {
+        lines.push("\nRelevant:".to_string());
+        for seed in output.expression_seeds.iter().take(5) {
+            let domain = seed.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
+            lines.push(format!("  * [{}]", domain));
+        }
+    }
+
+    if output.novel_connections > 0 {
+        lines.push(format!("\nNovel connections: {}", output.novel_connections));
+    }
+
+    lines.push(format!(
+        "\n[{} walkers, {} hops, {:.0}ms, {:.0} hops/s]",
+        output.walker_count, output.total_hops, output.total_ms, output.hops_per_sec
+    ));
+    lines.push("=== END RGW ===".to_string());
+    lines.join("\n")
+}
+
 fn empty_output() -> WalkOutput {
     WalkOutput {
         recommended_action: "rest".to_string(),
