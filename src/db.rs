@@ -156,6 +156,67 @@ pub async fn strengthen_edges(pool: &PgPool, edge_ids: &[i32], delta: f32) -> Re
     Ok(())
 }
 
+/// Create a new edge between two nodes. Returns the edge ID.
+/// This is how the graph GROWS — new connections form from:
+/// - Walker discovering cross-domain similarity
+/// - Memory compression reinforcing patterns
+/// - Web content linking to existing knowledge
+pub async fn create_edge(
+    pool: &PgPool,
+    source_id: i32,
+    target_id: i32,
+    edge_type: &str,
+    weight: f32,
+    emotional_charge: f32,
+) -> Result<i32, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO memory_edges (source_id, target_id, edge_type, weight, emotional_charge, \
+         traversal_count, last_traversed, created_at) \
+         VALUES ($1, $2, $3, $4, $5, 0, NOW(), NOW()) \
+         ON CONFLICT (source_id, target_id, edge_type) \
+         DO UPDATE SET weight = LEAST(1.0, memory_edges.weight + $4 * 0.5), \
+                       last_traversed = NOW() \
+         RETURNING id"
+    )
+    .bind(source_id)
+    .bind(target_id)
+    .bind(edge_type)
+    .bind(weight)
+    .bind(emotional_charge)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.get("id"))
+}
+
+/// Synaptic pruning: decay edges that haven't been traversed recently.
+/// Edges lose weight over time. Dead edges (weight ≤ 0.01) are deleted.
+/// This prevents the graph from becoming a dense hairball.
+pub async fn prune_edges(pool: &PgPool, decay_per_day: f32, min_weight: f32) -> Result<(i64, i64), sqlx::Error> {
+    // 1. Decay: reduce weight of edges not traversed in the last day
+    let decayed = sqlx::query(
+        "UPDATE memory_edges SET weight = GREATEST($1, weight - $2) \
+         WHERE last_traversed < NOW() - INTERVAL '1 day' \
+         AND weight > $1"
+    )
+    .bind(min_weight)
+    .bind(decay_per_day)
+    .execute(pool)
+    .await?
+    .rows_affected() as i64;
+
+    // 2. Delete: remove edges below minimum weight (forgotten)
+    let deleted = sqlx::query(
+        "DELETE FROM memory_edges WHERE weight <= $1"
+    )
+    .bind(min_weight)
+    .execute(pool)
+    .await?
+    .rows_affected() as i64;
+
+    Ok((decayed, deleted))
+}
+
 /// Get detailed graph stats for API
 pub async fn detailed_stats(pool: &PgPool) -> Result<serde_json::Value, sqlx::Error> {
     let stats = graph_stats(pool).await?;

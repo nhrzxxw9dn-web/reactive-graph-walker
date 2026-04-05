@@ -440,6 +440,82 @@ pub fn format_walk_context(output: &WalkOutput) -> String {
     lines.join("\n")
 }
 
+/// Rich graph-to-text: fetch node content and describe relationships.
+/// Translates raw node IDs into a narrative the LLM can understand.
+pub async fn format_walk_narrative(output: &WalkOutput, pool: &PgPool) -> String {
+    let mut lines = Vec::new();
+    lines.push("=== JULIAN'S MIND RIGHT NOW ===".to_string());
+    lines.push(format!(
+        "State: {} (confidence {:.0}%, novelty {:.0}%)",
+        output.recommended_action,
+        output.agreement_score * 100.0,
+        output.novelty_score * 100.0,
+    ));
+
+    // Fetch actual content for consensus nodes (what Julian is sure about)
+    if !output.consensus_nodes.is_empty() {
+        lines.push("\nStrong convictions:".to_string());
+        for &nid in output.consensus_nodes.iter().take(3) {
+            if let Ok(Some(node)) = db::get_node(pool, nid).await {
+                // Fetch the document text (title)
+                let title: Option<String> = sqlx::query_scalar(
+                    "SELECT title FROM memory_vectors WHERE id = $1"
+                )
+                .bind(nid)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+
+                let label = title.unwrap_or_else(|| format!("[{}:{}]", node.domain, nid));
+                lines.push(format!("  - {} (domain: {})", label, node.domain));
+            }
+        }
+    }
+
+    // Fetch content for divergent nodes (where perspectives disagree)
+    if !output.divergent_nodes.is_empty() {
+        lines.push("\nUnresolved tensions (walkers disagreed):".to_string());
+        for &nid in output.divergent_nodes.iter().take(3) {
+            if let Ok(Some(node)) = db::get_node(pool, nid).await {
+                let title: Option<String> = sqlx::query_scalar(
+                    "SELECT title FROM memory_vectors WHERE id = $1"
+                )
+                .bind(nid)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+
+                let label = title.unwrap_or_else(|| format!("[{}:{}]", node.domain, nid));
+                lines.push(format!("  ? {} (domain: {})", label, node.domain));
+            }
+        }
+    }
+
+    // Describe walker paths (what trails of thought were followed)
+    if !output.domain_distribution.is_empty() {
+        let mut sorted: Vec<_> = output.domain_distribution.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let narrative: Vec<String> = sorted.iter().take(3).map(|(d, c)| {
+            format!("{} ({}x)", d, c)
+        }).collect();
+        lines.push(format!("\nThought trails: {}", narrative.join(" → ")));
+    }
+
+    if output.novel_connections > 0 {
+        lines.push(format!(
+            "\nSurprises: {} unexpected cross-domain connections found",
+            output.novel_connections
+        ));
+    }
+
+    lines.push(format!(
+        "\n[{} perspectives, {:.0}ms thinking time]",
+        output.walker_count, output.total_ms
+    ));
+    lines.push("=== END ===".to_string());
+    lines.join("\n")
+}
+
 fn empty_output() -> WalkOutput {
     WalkOutput {
         recommended_action: "rest".to_string(),

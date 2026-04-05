@@ -13,6 +13,7 @@ mod diverger;
 mod llm;
 mod provider;
 mod openai;
+mod motor;
 mod api;
 
 use clap::Parser;

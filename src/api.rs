@@ -90,6 +90,8 @@ pub async fn serve(
         .route("/stats", get(stats))
         .route("/benchmark", get(benchmark))
         .route("/diverger", get(diverger_stats))
+        .route("/prune", post(prune))
+        .route("/edge", post(create_edge_endpoint))
         .route("/diverger/notify", post(diverger_notify))
         .route("/self", get(self_state))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
@@ -202,6 +204,74 @@ async fn diverger_notify(
         edge_type: req.edge_type,
     });
     StatusCode::ACCEPTED
+}
+
+/// POST /edge — create a new edge (node genesis / graph expansion)
+#[derive(Deserialize)]
+struct CreateEdgeRequest {
+    source_id: i32,
+    target_id: i32,
+    edge_type: String,
+    #[serde(default = "default_weight")]
+    weight: f32,
+    #[serde(default)]
+    emotional_charge: f32,
+}
+fn default_weight() -> f32 { 0.5 }
+
+async fn create_edge_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateEdgeRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match db::create_edge(
+        &state.pool,
+        req.source_id,
+        req.target_id,
+        &req.edge_type,
+        req.weight,
+        req.emotional_charge,
+    ).await {
+        Ok(edge_id) => {
+            // Notify the Diverger about the new edge
+            state.diverger.notify_edge_change(EdgeChange {
+                edge_id,
+                source_id: req.source_id,
+                target_id: req.target_id,
+                delta: req.weight,
+                edge_type: req.edge_type,
+            });
+            Ok(Json(serde_json::json!({"status": "ok", "edge_id": edge_id})))
+        }
+        Err(e) => {
+            tracing::error!("[edge] Creation failed: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /prune — synaptic pruning: decay + delete neglected edges
+async fn prune(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let decay_per_day = 0.02;  // Lose 0.02 weight per day of neglect
+    let min_weight = 0.01;      // Below this = forgotten = deleted
+
+    match db::prune_edges(&state.pool, decay_per_day, min_weight).await {
+        Ok((decayed, deleted)) => {
+            tracing::info!("[prune] Decayed {} edges, deleted {} dead edges", decayed, deleted);
+            Json(serde_json::json!({
+                "status": "ok",
+                "decayed": decayed,
+                "deleted": deleted,
+            }))
+        }
+        Err(e) => {
+            Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+            }))
+        }
+    }
 }
 
 /// GET /benchmark — run multiple walk configs and report performance
