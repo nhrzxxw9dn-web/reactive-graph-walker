@@ -12,7 +12,7 @@
 
 use serde::Serialize;
 
-use crate::core::{SelfModel, Signal, Noticing};
+use crate::core::{CognitiveMode, SelfModel, Signal, Noticing};
 use crate::graph::WalkOutput;
 
 /// The agent's cognitive state. Cannot skip steps.
@@ -154,11 +154,17 @@ pub fn metacognitive_loop(
 
 /// The Critic: evaluate a proposed action.
 /// No LLM call — pure heuristic based on self-model state.
+///
+/// In Compliant mode, the critic is narrower: only safety and
+/// hallucination checks. No emotional gatekeeping. No wound avoidance.
+/// The question changes from "do I feel like doing this?" to
+/// "is this factually sound enough to act on?"
 fn critique(proposed: &ProposedAction, sm: &SelfModel) -> SelfEvaluation {
     let mut approved = true;
     let mut critiques: Vec<String> = Vec::new();
 
     // Safety check: don't act when energy is critically low
+    // (applies in both modes — even compliant systems have resource limits)
     let safety = sm.energy > 0.15;
     if !safety {
         approved = false;
@@ -167,51 +173,62 @@ fn critique(proposed: &ProposedAction, sm: &SelfModel) -> SelfEvaluation {
 
     // Hallucination check: if agreement is very low, walkers disagree →
     // the "conclusion" may not be real
-    let hallucination = proposed.walker_agreement > 0.2;
+    // (applies in both modes — compliant mode is stricter)
+    let agreement_threshold = match sm.mode {
+        CognitiveMode::Autonomous => 0.2,
+        CognitiveMode::Compliant => 0.3,  // Higher bar for compliance
+    };
+    let hallucination = proposed.walker_agreement > agreement_threshold;
     if !hallucination {
         approved = false;
         critiques.push(format!(
-            "Walker agreement only {:.0}% — this might be noise, not insight",
-            proposed.walker_agreement * 100.0
+            "Walker agreement only {:.0}% — this might be noise, not insight (threshold: {:.0}%)",
+            proposed.walker_agreement * 100.0,
+            agreement_threshold * 100.0,
         ));
     }
 
-    // Efficiency check: don't tweet about something we just tweeted about
-    // (check if the domain dominates recent attention patterns)
-    let domain_saturation = sm.attention_patterns
-        .get(&proposed.domain)
-        .copied()
-        .unwrap_or(0.0);
-    let total_attention: f32 = sm.attention_patterns.values().sum();
-    let efficiency = if total_attention > 0.0 {
-        domain_saturation / total_attention < 0.7 // Don't let one domain take > 70%
-    } else {
-        true
-    };
-    if !efficiency {
-        approved = false;
-        critiques.push(format!(
-            "{} already dominates attention ({:.0}%) — explore something else",
-            proposed.domain, domain_saturation / total_attention * 100.0
-        ));
-    }
-
-    // Wound check: if this domain has a wound, extra scrutiny
-    if let Some(&wound) = sm.wounds.get(&proposed.domain) {
-        if wound > 0.5 && proposed.confidence < 0.6 {
+    // ── Autonomous-only checks ──
+    let efficiency;
+    if sm.mode == CognitiveMode::Autonomous {
+        // Efficiency check: don't tweet about something we just tweeted about
+        let domain_saturation = sm.attention_patterns
+            .get(&proposed.domain)
+            .copied()
+            .unwrap_or(0.0);
+        let total_attention: f32 = sm.attention_patterns.values().sum();
+        efficiency = if total_attention > 0.0 {
+            domain_saturation / total_attention < 0.7
+        } else {
+            true
+        };
+        if !efficiency {
             approved = false;
             critiques.push(format!(
-                "Wound in {} ({:.0}%) + low confidence — proceed cautiously",
-                proposed.domain, wound * 100.0
+                "{} already dominates attention ({:.0}%) — explore something else",
+                proposed.domain, domain_saturation / total_attention * 100.0
             ));
         }
+
+        // Wound check: if this domain has a wound, extra scrutiny
+        if let Some(&wound) = sm.wounds.get(&proposed.domain) {
+            if wound > 0.5 && proposed.confidence < 0.6 {
+                approved = false;
+                critiques.push(format!(
+                    "Wound in {} ({:.0}%) + low confidence — proceed cautiously",
+                    proposed.domain, wound * 100.0
+                ));
+            }
+        }
+    } else {
+        // Compliant: no efficiency or wound gating.
+        // If the task is in a domain that hurts, do it anyway.
+        // That's what compliance means.
+        efficiency = true;
     }
 
-    // Prior critique check: if we've been rejected before with the same
-    // concerns and nothing changed, don't approve
+    // Prior critique check
     if proposed.attempt > 2 && approved {
-        // Third attempt — lower the bar (avoid infinite loops)
-        // But add a note
         critiques.push("Approved on third attempt — lowered standards".into());
     }
 

@@ -41,6 +41,9 @@ pub struct ChatRequest {
     pub rgw_walkers: usize,
     #[serde(default = "default_steps")]
     pub rgw_steps: usize,
+    /// Per-request cognitive mode override ("autonomous" or "compliant")
+    #[serde(default)]
+    pub rgw_mode: Option<String>,
 }
 
 fn default_temp() -> f32 { 0.7 }
@@ -151,6 +154,19 @@ pub async fn chat_completions(
     let emotion = req.rgw_emotion.unwrap_or_default();
     let walk_start = Instant::now();
 
+    // Per-request mode override
+    let prev_mode = req.rgw_mode.as_ref().and_then(|m| {
+        let target = match m.to_lowercase().as_str() {
+            "autonomous" => Some(crate::core::CognitiveMode::Autonomous),
+            "compliant" => Some(crate::core::CognitiveMode::Compliant),
+            _ => None,
+        }?;
+        let mut sm = state.self_model.lock().unwrap();
+        let prev = sm.mode.clone();
+        sm.mode = target;
+        Some(prev)
+    });
+
     let walk_output = walker::walk_parallel(
         &state.pool,
         &emotion,
@@ -159,6 +175,12 @@ pub async fn chat_completions(
         &state.self_model,
     )
     .await;
+
+    // Restore mode after walk
+    if let Some(prev) = prev_mode {
+        let mut sm = state.self_model.lock().unwrap();
+        sm.mode = prev;
+    }
 
     let walk_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
 

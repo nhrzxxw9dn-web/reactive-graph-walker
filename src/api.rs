@@ -15,7 +15,7 @@ use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
 
 use crate::db;
-use crate::core::SelfModel;
+use crate::core::{CognitiveMode, SelfModel};
 use crate::diverger::{Diverger, EdgeChange};
 use crate::graph::*;
 use crate::openai;
@@ -42,6 +42,10 @@ pub struct WalkRequest {
     pub n_walkers: usize,
     #[serde(default = "default_steps")]
     pub steps: usize,
+    /// Per-request cognitive mode override.
+    /// If set, temporarily switches mode for this walk only.
+    #[serde(default)]
+    pub rgw_mode: Option<String>,
 }
 
 fn default_walkers() -> usize { 4 }
@@ -96,6 +100,7 @@ pub async fn serve(
         .route("/edge", post(create_edge_endpoint))
         .route("/diverger/notify", post(diverger_notify))
         .route("/self", get(self_state))
+        .route("/self/mode", post(set_mode_endpoint))
         .route("/self/save", post(save_self_model_endpoint))
         .route("/tools", get(list_tools))
         .route("/tools/execute", post(execute_tool_endpoint))
@@ -161,6 +166,15 @@ async fn walk(
         req.n_walkers
     };
 
+    // Per-request mode override: temporarily switch, walk, restore
+    let prev_mode = req.rgw_mode.as_ref().and_then(|m| {
+        let target = parse_mode(m)?;
+        let mut sm = state.self_model.lock().unwrap();
+        let prev = sm.mode.clone();
+        sm.mode = target;
+        Some(prev)
+    });
+
     let output = walker::walk_parallel(
         &state.pool,
         &req.emotional_state,
@@ -169,6 +183,12 @@ async fn walk(
         &state.self_model,
     )
     .await;
+
+    // Restore previous mode if we overrode it
+    if let Some(prev) = prev_mode {
+        let mut sm = state.self_model.lock().unwrap();
+        sm.mode = prev;
+    }
 
     Ok(Json(output))
 }
@@ -462,6 +482,49 @@ async fn prune(
             Json(serde_json::json!({
                 "status": "error",
                 "error": e.to_string(),
+            }))
+        }
+    }
+}
+
+/// Parse a mode string ("autonomous", "compliant") into CognitiveMode
+fn parse_mode(s: &str) -> Option<CognitiveMode> {
+    match s.to_lowercase().as_str() {
+        "autonomous" => Some(CognitiveMode::Autonomous),
+        "compliant" => Some(CognitiveMode::Compliant),
+        _ => None,
+    }
+}
+
+/// POST /self/mode — switch cognitive mode globally
+#[derive(Deserialize)]
+struct SetModeRequest {
+    mode: String,
+}
+
+async fn set_mode_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetModeRequest>,
+) -> Json<serde_json::Value> {
+    match parse_mode(&req.mode) {
+        Some(mode) => {
+            let prev = {
+                let mut sm = state.self_model.lock().unwrap();
+                let prev = sm.mode.clone();
+                sm.mode = mode.clone();
+                prev
+            };
+            tracing::info!("[rgw] Cognitive mode: {:?} → {:?}", prev, mode);
+            Json(serde_json::json!({
+                "status": "ok",
+                "previous": format!("{:?}", prev),
+                "current": format!("{:?}", mode),
+            }))
+        }
+        None => {
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Unknown mode '{}'. Use 'autonomous' or 'compliant'", req.mode),
             }))
         }
     }

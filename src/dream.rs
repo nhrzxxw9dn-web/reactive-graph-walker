@@ -71,16 +71,35 @@ pub struct DreamInsight {
     pub novelty: f32,
 }
 
-/// Run a dream session. Call when Julian's energy is low.
+/// Run a dream session. Call when energy is low.
 ///
 /// The motor cortex should be disconnected BEFORE calling this.
 /// Dreams produce internal graph changes, not external actions.
+///
+/// In Compliant mode, dreaming is disabled — the graph topology
+/// must remain stable and deterministic. No Monte Carlo mutations.
 pub async fn dream(
     pool: &PgPool,
     self_model: &Arc<std::sync::Mutex<SelfModel>>,
     config: DreamConfig,
 ) -> DreamReport {
     let start = Instant::now();
+
+    // Compliant mode: no dreaming. Graph stays frozen.
+    {
+        let sm = self_model.lock().unwrap();
+        if sm.mode == core::CognitiveMode::Compliant {
+            tracing::info!("[dream] Compliant mode — dreaming disabled, graph frozen");
+            return DreamReport {
+                walks_completed: 0,
+                connections_found: 0,
+                connections_kept: 0,
+                edges_created: 0,
+                insights: Vec::new(),
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+            };
+        }
+    }
 
     // Signal: entering dream state
     {

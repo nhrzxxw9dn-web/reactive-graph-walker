@@ -107,6 +107,42 @@ impl WalkerBias {
 
         w.max(0.001)
     }
+
+    /// Score an edge in Compliant mode — no emotional modulation.
+    /// Pure weight-based scoring. The edge's weight IS the score,
+    /// plus bias-specific type preferences. No arousal, no valence
+    /// alignment, no emotional charge influence.
+    pub fn score_edge_compliant(
+        &self,
+        edge_type: &str,
+        edge_weight: f32,
+        traversal_count: i32,
+    ) -> f32 {
+        let mut w = edge_weight;
+
+        match self {
+            WalkerBias::Experience => {
+                if edge_type == "reinforces" || edge_type == "similar" {
+                    w *= 2.0;
+                }
+            }
+            WalkerBias::Analytical => {
+                if edge_type == "caused" || edge_type == "reinforces" {
+                    w *= 2.0;
+                }
+            }
+            // Other biases shouldn't reach here in compliant mode,
+            // but handle gracefully — pure weight, no modification
+            _ => {}
+        }
+
+        // Freshness penalty still applies
+        if traversal_count > 5 {
+            w *= 0.8;
+        }
+
+        w.max(0.001)
+    }
 }
 
 /// Result of a single walker's traversal

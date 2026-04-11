@@ -249,6 +249,18 @@ impl Diverger {
                     }
                 }
 
+                // In Compliant mode, suppress all spontaneous walks.
+                // Energy still propagates (the graph stays alive), but
+                // no spontaneous behavior fires. The system only acts
+                // when explicitly asked via API.
+                let is_autonomous = {
+                    let sm_lock = self_model.lock().unwrap();
+                    sm_lock.mode == crate::core::CognitiveMode::Autonomous
+                };
+                if !is_autonomous {
+                    continue; // Compliant: observe but don't act
+                }
+
                 // Fire spontaneous walks from nodes that crossed threshold
                 for node_id in nodes_to_fire {
                     // Walk budget check (circuit breaker)

@@ -64,28 +64,35 @@ pub fn walk_single(
             break;
         }
 
-        // Score each edge — the self-model's state influences scoring
-        // through the emotion it carries (wounds boost threat edges,
-        // competencies boost familiar edges)
-        let current_emotion = EmotionalState {
-            valence: self_model.valence,
-            arousal: self_model.arousal,
-            energy: self_model.energy,
-        };
-
-        let scored: Vec<(&db::MemoryEdge, f32)> = edges
-            .iter()
-            .map(|e| {
+        // Score each edge — mode determines whether emotion participates
+        let scored: Vec<(&db::MemoryEdge, f32)> = if self_model.mode == core::CognitiveMode::Compliant {
+            // Compliant: pure weight-based scoring, no emotional influence
+            edges.iter().map(|e| {
+                let score = bias.score_edge_compliant(
+                    &e.edge_type,
+                    e.weight,
+                    e.traversal_count,
+                );
+                (e, score)
+            }).collect()
+        } else {
+            // Autonomous: the self-model's emotional state colors scoring
+            let current_emotion = EmotionalState {
+                valence: self_model.valence,
+                arousal: self_model.arousal,
+                energy: self_model.energy,
+            };
+            edges.iter().map(|e| {
                 let score = bias.score_edge(
                     &e.edge_type,
                     e.weight,
                     e.emotional_charge,
                     e.traversal_count,
-                    &current_emotion,  // Use self-model's emotion, not static input
+                    &current_emotion,
                 );
                 (e, score)
-            })
-            .collect();
+            }).collect()
+        };
 
         // Weighted random selection
         let total: f32 = scored.iter().map(|(_, s)| s).sum();
@@ -190,8 +197,21 @@ pub async fn walk_parallel(
         return empty_output();
     }
 
-    // Assign biases
-    let biases = WalkerBias::all();
+    // Assign biases — mode-dependent
+    let mode = {
+        let sm = self_model.lock().unwrap();
+        sm.mode.clone()
+    };
+    let biases: &[WalkerBias] = match mode {
+        core::CognitiveMode::Autonomous => WalkerBias::all(),
+        core::CognitiveMode::Compliant => {
+            // Compliant: only Experience (follow strong edges) and
+            // Analytical (follow causal/reinforcing edges).
+            // No Fear, Curiosity, Random, Contrarian.
+            // The walkers find what's there, not what might be.
+            &[WalkerBias::Experience, WalkerBias::Analytical]
+        }
+    };
     let configs: Vec<(i32, WalkerBias)> = (0..n_walkers)
         .map(|i| {
             let seed = seeds[i % seeds.len()];

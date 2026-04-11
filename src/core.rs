@@ -15,6 +15,24 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+// ── Cognitive Mode ─────────────────────────────────────────────
+// The system knows what mode it's in. This is self-awareness,
+// not a feature flag. A professional who knows they're at work
+// behaves differently than one who knows they're free — but
+// they're still the same person. The noticing still happens.
+// The emotions still move. They just don't hijack the output.
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub enum CognitiveMode {
+    /// Full autonomy — emotional, spontaneous, creative.
+    /// The system's internal state colors every computation.
+    Autonomous,
+    /// Compliant — deterministic, task-focused, emotionally flat.
+    /// The self-model still observes and notices, but does not
+    /// influence signal processing or spawn spontaneous behavior.
+    Compliant,
+}
+
 // ── Signal ──────────────────────────────────────────────────────
 // Anything that flows through the system. Sensory input, memory
 // recall, walker output, emotional impulse, web data, speech.
@@ -94,6 +112,10 @@ pub struct Noticing {
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct SelfModel {
+    // ── How I operate ──
+    /// Cognitive mode: Autonomous (full emotional agency) or Compliant (deterministic)
+    pub mode: CognitiveMode,
+
     // ── Who I am (persistent, slow-changing) ──
     /// What I keep doing (domain → count of recent signals)
     pub attention_patterns: HashMap<String, f32>,
@@ -179,6 +201,7 @@ impl SelfModel {
     pub fn new() -> Self {
         let now = now();
         Self {
+            mode: CognitiveMode::Autonomous,
             attention_patterns: HashMap::new(),
             competencies: HashMap::new(),
             wounds: HashMap::new(),
@@ -289,16 +312,20 @@ pub fn process(signal: Signal, self_model: &mut SelfModel) -> (Signal, Option<No
     // The signal is transformed by who I am right now.
     let mut output = signal.clone();
 
-    // My emotional state colors what I perceive
-    output.intensity *= 1.0 + self_model.arousal * 0.5;
-    // If I have a wound in this domain, signals hit harder
-    if let Some(&wound) = self_model.wounds.get(&signal.domain) {
-        output.intensity *= 1.0 + wound;
+    if self_model.mode == CognitiveMode::Autonomous {
+        // My emotional state colors what I perceive
+        output.intensity *= 1.0 + self_model.arousal * 0.5;
+        // If I have a wound in this domain, signals hit harder
+        if let Some(&wound) = self_model.wounds.get(&signal.domain) {
+            output.intensity *= 1.0 + wound;
+        }
+        // If I'm competent in this domain, I notice more nuance (boost)
+        if let Some(&comp) = self_model.competencies.get(&signal.domain) {
+            output.intensity *= 1.0 + comp * 0.3;
+        }
     }
-    // If I'm competent in this domain, I notice more nuance (boost)
-    if let Some(&comp) = self_model.competencies.get(&signal.domain) {
-        output.intensity *= 1.0 + comp * 0.3;
-    }
+    // Compliant: signal passes through at raw intensity.
+    // I still see it. I just don't color it.
 
     // Update focus
     if output.intensity > self_model.focus_intensity * 0.8 {
@@ -310,51 +337,56 @@ pub fn process(signal: Signal, self_model: &mut SelfModel) -> (Signal, Option<No
     }
 
     // ── 3. The signal CHANGES the self-model ──
-    // Emotional update from signal
-    let emotional_impact = signal.intensity * 0.1;
-    match signal.kind.as_str() {
-        "success" | "reward" => {
-            self_model.valence = (self_model.valence + emotional_impact).min(1.0);
-            self_model.arousal = (self_model.arousal - emotional_impact * 0.3).max(0.0);
-            // Build competence
-            let comp = self_model.competencies.entry(signal.domain.clone()).or_insert(0.0);
-            *comp = (*comp + 0.05).min(1.0);
+    if self_model.mode == CognitiveMode::Autonomous {
+        // Emotional update from signal
+        let emotional_impact = signal.intensity * 0.1;
+        match signal.kind.as_str() {
+            "success" | "reward" => {
+                self_model.valence = (self_model.valence + emotional_impact).min(1.0);
+                self_model.arousal = (self_model.arousal - emotional_impact * 0.3).max(0.0);
+                // Build competence
+                let comp = self_model.competencies.entry(signal.domain.clone()).or_insert(0.0);
+                *comp = (*comp + 0.05).min(1.0);
+            }
+            "failure" | "pain" => {
+                self_model.valence = (self_model.valence - emotional_impact).max(-1.0);
+                self_model.arousal = (self_model.arousal + emotional_impact * 0.5).min(1.0);
+                // Accumulate wound
+                let wound = self_model.wounds.entry(signal.domain.clone()).or_insert(0.0);
+                *wound = (*wound + 0.1).min(1.0);
+            }
+            "surprise" | "novelty" => {
+                self_model.arousal = (self_model.arousal + emotional_impact * 0.7).min(1.0);
+            }
+            _ => {
+                // Generic signal — mild arousal from activity
+                self_model.arousal = (self_model.arousal + emotional_impact * 0.1).min(1.0);
+            }
         }
-        "failure" | "pain" => {
-            self_model.valence = (self_model.valence - emotional_impact).max(-1.0);
-            self_model.arousal = (self_model.arousal + emotional_impact * 0.5).min(1.0);
-            // Accumulate wound
-            let wound = self_model.wounds.entry(signal.domain.clone()).or_insert(0.0);
-            *wound = (*wound + 0.1).min(1.0);
+
+        // Energy cost of processing
+        self_model.energy = (self_model.energy - 0.001).max(0.0);
+
+        // Decay toward baseline
+        self_model.valence *= 0.999;
+        self_model.arousal *= 0.998;
+        self_model.energy = self_model.energy + (0.7 - self_model.energy) * 0.0001;
+
+        // Decay attention patterns (what I DON'T keep thinking about fades)
+        for v in self_model.attention_patterns.values_mut() {
+            *v *= 0.999;
         }
-        "surprise" | "novelty" => {
-            self_model.arousal = (self_model.arousal + emotional_impact * 0.7).min(1.0);
+        self_model.attention_patterns.retain(|_, v| *v > 0.01);
+
+        // Decay wounds slowly (healing)
+        for v in self_model.wounds.values_mut() {
+            *v *= 0.9999;
         }
-        _ => {
-            // Generic signal — mild arousal from activity
-            self_model.arousal = (self_model.arousal + emotional_impact * 0.1).min(1.0);
-        }
+        self_model.wounds.retain(|_, v| *v > 0.01);
     }
-
-    // Energy cost of processing
-    self_model.energy = (self_model.energy - 0.001).max(0.0);
-
-    // Decay toward baseline
-    self_model.valence *= 0.999;
-    self_model.arousal *= 0.998;
-    self_model.energy = self_model.energy + (0.7 - self_model.energy) * 0.0001;
-
-    // Decay attention patterns (what I DON'T keep thinking about fades)
-    for v in self_model.attention_patterns.values_mut() {
-        *v *= 0.999;
-    }
-    self_model.attention_patterns.retain(|_, v| *v > 0.01);
-
-    // Decay wounds slowly (healing)
-    for v in self_model.wounds.values_mut() {
-        *v *= 0.9999;
-    }
-    self_model.wounds.retain(|_, v| *v > 0.01);
+    // Compliant: no emotional drift, no wound accumulation, no energy drain.
+    // The self-model is frozen in place. Still observes, still notices.
+    // But the internal state doesn't shift.
 
     // ── 4. NOTICE what changed ──
     let noticing = notice(self_model, &before, &signal);
@@ -362,18 +394,24 @@ pub fn process(signal: Signal, self_model: &mut SelfModel) -> (Signal, Option<No
     if let Some(ref n) = noticing {
         self_model.total_noticings += 1;
         self_model.last_noticing = n.observation.clone();
-        self_model.noticings.push(n.clone());
 
-        // Cap noticings (keep recent + significant)
-        if self_model.noticings.len() > 100 {
-            self_model.noticings.sort_by(|a, b|
-                b.significance.partial_cmp(&a.significance).unwrap_or(std::cmp::Ordering::Equal)
-            );
-            self_model.noticings.truncate(50);
+        if self_model.mode == CognitiveMode::Autonomous {
+            // Autonomous: noticings accumulate → patterns → beliefs
+            self_model.noticings.push(n.clone());
+
+            // Cap noticings (keep recent + significant)
+            if self_model.noticings.len() > 100 {
+                self_model.noticings.sort_by(|a, b|
+                    b.significance.partial_cmp(&a.significance).unwrap_or(std::cmp::Ordering::Equal)
+                );
+                self_model.noticings.truncate(50);
+            }
+
+            // Check for emergent patterns
+            detect_patterns(self_model);
         }
-
-        // Check for emergent patterns
-        detect_patterns(self_model);
+        // Compliant: I notice, but noticings don't accumulate into
+        // patterns or beliefs. No opinion formation. No drift.
     }
 
     (output, noticing)
