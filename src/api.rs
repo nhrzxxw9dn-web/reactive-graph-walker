@@ -29,6 +29,8 @@ pub struct AppState {
     pub ollama_url: String,
     pub expression_model: String,
     pub julian_url: String,
+    /// Intelligent LLM router (local + cloud). If None, falls back to Ollama.
+    pub provider: Option<crate::provider::Provider>,
 }
 
 /// Walk request (matches Python WalkRequest)
@@ -80,6 +82,21 @@ pub async fn serve(
     let seeds = db::seed_nodes(&pool, 50).await.unwrap_or_default();
     diverger.seed_energy(seeds, 0.3).await;
 
+    // Try to initialize the intelligent provider router
+    let provider = {
+        let config = crate::provider::ProviderConfig::default();
+        match crate::provider::Provider::new(config) {
+            Ok(p) => {
+                tracing::info!("[rgw] Provider router initialized");
+                Some(p)
+            }
+            Err(e) => {
+                tracing::info!("[rgw] Provider router unavailable ({}), using Ollama fallback", e);
+                None
+            }
+        }
+    };
+
     let state = Arc::new(AppState {
         pool,
         diverger,
@@ -87,6 +104,7 @@ pub async fn serve(
         ollama_url: ollama_url.to_string(),
         expression_model: expression_model.to_string(),
         julian_url: julian_url.to_string(),
+        provider,
     });
 
     let app = Router::new()
@@ -110,6 +128,8 @@ pub async fn serve(
         .route("/music/midi", get(music_midi_endpoint))
         .route("/music/generate", post(music_generate_endpoint))
         .route("/music/prompt", get(music_prompt_endpoint))
+        // Signal ingest — external events feed into the cognitive loop
+        .route("/ingest/signal", post(ingest_signal_endpoint))
         // OpenAI-compatible endpoints (drop-in replacement for Ollama)
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
@@ -485,6 +505,60 @@ async fn prune(
             }))
         }
     }
+}
+
+/// POST /ingest/signal — inject an external signal into the cognitive loop.
+///
+/// Use this for RSS feed items, inbound emails, webhooks, calendar events,
+/// or any external data source that should enter the agent's awareness.
+///
+/// The signal flows through core::process(), meaning the self-model observes it,
+/// and in Autonomous mode, it can trigger emotional shifts, focus changes,
+/// and downstream diverger activity.
+#[derive(Deserialize)]
+struct IngestSignalRequest {
+    /// Signal kind: "rss", "email", "webhook", "calendar", "social_mention", "analytics", etc.
+    kind: String,
+    /// The content (human-readable text that the agent will process)
+    content: String,
+    /// Domain tag for attention tracking
+    #[serde(default)]
+    domain: String,
+    /// Signal strength (0.0-1.0, default 0.5)
+    #[serde(default = "default_intensity")]
+    intensity: f32,
+}
+fn default_intensity() -> f32 { 0.5 }
+
+async fn ingest_signal_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestSignalRequest>,
+) -> Json<serde_json::Value> {
+    let mut sm = state.self_model.lock().unwrap();
+
+    let signal = crate::core::Signal::new(&req.kind, &req.content)
+        .with_domain(if req.domain.is_empty() { &req.kind } else { &req.domain })
+        .with_intensity(req.intensity.clamp(0.0, 1.0));
+
+    let (output, noticing) = crate::core::process(signal, &mut sm);
+
+    Json(serde_json::json!({
+        "status": "ingested",
+        "kind": req.kind,
+        "output_intensity": output.intensity,
+        "noticing": noticing.as_ref().map(|n| serde_json::json!({
+            "kind": n.kind,
+            "observation": n.observation,
+            "significance": n.significance,
+        })),
+        "self_model": {
+            "valence": sm.valence,
+            "arousal": sm.arousal,
+            "energy": sm.energy,
+            "focus": sm.current_focus,
+            "mode": format!("{:?}", sm.mode),
+        },
+    }))
 }
 
 /// Parse a mode string ("autonomous", "compliant") into CognitiveMode

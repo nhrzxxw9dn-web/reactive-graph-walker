@@ -1,17 +1,31 @@
-//! Motor Cortex — RGW commands Julian's Python backend to act.
+//! Motor Cortex — RGW commands the execution backend to act.
 //!
 //! When the Diverger fires a walk and the result says "express" or
 //! "explore" or "search", the motor cortex translates that into an
-//! HTTP command to Julian's Python API.
+//! HTTP command to the Python backend API.
 //!
 //! Rust brain → Python body. The brain decides, the body executes.
+//!
+//! The `params` field carries action-specific payloads, enabling
+//! multimodal commands (image prompts, social targets, blog metadata)
+//! without changing the MotorCommand struct for each new capability.
 
 use serde::Serialize;
 
-/// Command that RGW sends to Julian's Python backend.
+/// Command that RGW sends to the execution backend.
+///
+/// Actions: "tweet", "blog", "journal", "search", "explore",
+///          "image_generate", "post_social", "email", "nothing"
+///
+/// The `params` field carries action-specific structured data:
+///   - image_generate: {"prompt": "...", "style": "...", "size": "1024x1024", "provider": "comfyui"}
+///   - post_social:    {"platform": "twitter", "text": "...", "image_url": "...", "schedule_at": "..."}
+///   - blog:           {"title": "...", "body_md": "...", "tags": [...], "publish": true}
+///   - tweet:          {"text": "...", "reply_to": "...", "media_ids": [...]}
+///   - email:          {"to": "...", "subject": "...", "body": "..."}
 #[derive(Debug, Clone, Serialize)]
 pub struct MotorCommand {
-    /// What to do: "tweet", "blog", "journal", "search", "trade", "nothing"
+    /// What to do
     pub action: String,
     /// Which domain this relates to
     pub domain: String,
@@ -25,6 +39,9 @@ pub struct MotorCommand {
     pub novelty: f32,
     /// Search query (if action = "search")
     pub search_query: Option<String>,
+    /// Action-specific parameters (flexible JSON payload for multimodal commands)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
 }
 
 /// Send a motor command to Julian's Python backend.

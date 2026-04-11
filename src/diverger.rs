@@ -342,6 +342,7 @@ impl Diverger {
                                         confidence: if surprises > 0 { 0.4 } else { 0.6 },
                                         novelty: surprises as f32 / hops.max(1) as f32,
                                         search_query,
+                                        params: None,
                                     };
                                     crate::motor::execute(&julian_url, cmd).await;
                                 }

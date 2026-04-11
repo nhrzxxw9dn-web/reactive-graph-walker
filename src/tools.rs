@@ -94,10 +94,57 @@ pub fn available_tools() -> Vec<Tool> {
                 "required": ["source_id", "target_id", "edge_type"]
             }),
         },
+        Tool {
+            name: "image_generate".into(),
+            description: "Generate an image from a text prompt. Delegates to the motor cortex backend (ComfyUI, DALL-E, or Midjourney).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Image generation prompt"},
+                    "style": {"type": "string", "description": "Style hint: photorealistic, illustration, abstract, etc."},
+                    "size": {"type": "string", "description": "Image size (e.g. 1024x1024)"},
+                    "provider": {"type": "string", "description": "Backend: comfyui, dalle, midjourney (default: auto)"}
+                },
+                "required": ["prompt"]
+            }),
+        },
+        Tool {
+            name: "post_social".into(),
+            description: "Post content to a social media platform. Delegates to the motor cortex backend.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string", "description": "Target: twitter, bluesky, mastodon, linkedin"},
+                    "text": {"type": "string", "description": "Post text content"},
+                    "image_url": {"type": "string", "description": "Optional image URL to attach"},
+                    "schedule_at": {"type": "string", "description": "ISO 8601 timestamp for scheduled posting"}
+                },
+                "required": ["platform", "text"]
+            }),
+        },
+        Tool {
+            name: "blog_publish".into(),
+            description: "Publish a blog post. Delegates to the motor cortex backend (WordPress, static site, CMS).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Blog post title"},
+                    "body_md": {"type": "string", "description": "Post body in Markdown"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Post tags/categories"},
+                    "publish": {"type": "boolean", "description": "Publish immediately (true) or save as draft (false)"}
+                },
+                "required": ["title", "body_md"]
+            }),
+        },
     ]
 }
 
-/// Execute a tool by name
+/// Execute a tool by name.
+///
+/// Motor-delegated tools (image_generate, post_social, blog_publish)
+/// require a `motor_url` in the params to reach the execution backend.
+/// If absent, they return a "no backend configured" error, which the
+/// friction system converts into a capability wound.
 pub async fn execute_tool(
     name: &str,
     params: serde_json::Value,
@@ -109,11 +156,98 @@ pub async fn execute_tool(
         "web_fetch" => web_fetch(params).await,
         "memory_store" => memory_store(params, pool).await,
         "edge_create" => edge_create(params, pool).await,
+        "image_generate" => motor_tool("image_generate", params).await,
+        "post_social" => motor_tool("post_social", params).await,
+        "blog_publish" => motor_tool("blog_publish", params).await,
         _ => ToolResult {
             tool: name.into(),
             success: false,
             content: format!("Unknown tool: {}", name),
             metadata: serde_json::json!({}),
+        },
+    }
+}
+
+/// Delegate a tool invocation to the motor cortex backend.
+///
+/// The tool params are forwarded as `MotorCommand.params`. The motor
+/// backend is responsible for routing to the correct API (ComfyUI,
+/// Twitter, WordPress, etc).
+///
+/// Expects `motor_url` in params or uses RGW_MOTOR_URL env var.
+async fn motor_tool(action: &str, params: serde_json::Value) -> ToolResult {
+    let motor_url = params["motor_url"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("RGW_MOTOR_URL").unwrap_or_default());
+
+    if motor_url.is_empty() {
+        return ToolResult {
+            tool: action.into(),
+            success: false,
+            content: format!(
+                "No motor cortex backend configured for '{}'. Set RGW_MOTOR_URL or pass motor_url in params.",
+                action
+            ),
+            metadata: serde_json::json!({"action": action, "needs_backend": true}),
+        };
+    }
+
+    // Strip motor_url from params before forwarding
+    let mut clean_params = params.clone();
+    if let Some(obj) = clean_params.as_object_mut() {
+        obj.remove("motor_url");
+    }
+
+    let cmd = crate::motor::MotorCommand {
+        action: action.to_string(),
+        domain: params["domain"].as_str().unwrap_or("content").to_string(),
+        walker_context: String::new(),
+        expression_seeds: Vec::new(),
+        confidence: 0.8,
+        novelty: 0.0,
+        search_query: None,
+        params: Some(clean_params),
+    };
+
+    // Motor commands are fire-and-forget by design, but for tool
+    // invocations we want acknowledgment. Use a direct POST.
+    let url = format!("{}/api/admin/rgw/execute", motor_url);
+    match reqwest::Client::new()
+        .post(&url)
+        .json(&cmd)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            ToolResult {
+                tool: action.into(),
+                success: true,
+                content: if body.is_empty() {
+                    format!("{} command accepted by motor cortex", action)
+                } else {
+                    body[..body.len().min(2000)].to_string()
+                },
+                metadata: serde_json::json!({"action": action, "motor_url": motor_url}),
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            ToolResult {
+                tool: action.into(),
+                success: false,
+                content: format!("Motor cortex rejected {} (HTTP {}): {}", action, status, &body[..body.len().min(200)]),
+                metadata: serde_json::json!({"action": action, "status": status}),
+            }
+        }
+        Err(e) => ToolResult {
+            tool: action.into(),
+            success: false,
+            content: format!("Motor cortex unreachable for {}: {}", action, e),
+            metadata: serde_json::json!({"action": action, "error": e.to_string()}),
         },
     }
 }

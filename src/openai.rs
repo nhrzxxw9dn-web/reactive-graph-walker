@@ -193,21 +193,57 @@ pub async fn chat_completions(
         stimulus,
     );
 
-    // 4. Forward to Qwen via Ollama for text expression
+    // 4. Generate text — route through provider or fall back to Ollama
+    //
+    // Complexity is derived from walker output:
+    //   - High novelty + low agreement = complex (needs strong model)
+    //   - Low novelty + high agreement = simple (cheap/local model)
+    let complexity = (walk_output.novelty_score * 0.6 + (1.0 - walk_output.agreement_score) * 0.4)
+        .clamp(0.0, 1.0);
+
     let expr_start = Instant::now();
-    let text = forward_to_ollama(
-        &state.ollama_url,
-        &state.expression_model,
-        &req.messages,
-        &walker_context,
-        req.temperature,
-        req.max_tokens,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("Ollama forward failed: {}. Returning walker context as fallback.", e);
-        walker_context.clone()
-    });
+    let text = if let Some(ref provider) = state.provider {
+        // Intelligent routing: complexity determines local vs cloud
+        let system_with_context = if system_prompt.is_empty() {
+            walker_context.clone()
+        } else {
+            format!("{}\n\n{}", system_prompt, walker_context)
+        };
+        let result = provider.generate(
+            &system_with_context,
+            &stimulus,
+            complexity,
+            req.max_tokens,
+            req.temperature,
+        ).await;
+
+        if !result.text.is_empty() {
+            tracing::info!(
+                "[rgw] Provider routed: {:?} (complexity={:.2})",
+                result.model_used, complexity
+            );
+            result.text
+        } else {
+            // Provider returned nothing — fall back to Ollama
+            tracing::warn!("[rgw] Provider returned empty, falling back to Ollama");
+            forward_to_ollama(
+                &state.ollama_url, &state.expression_model,
+                &req.messages, &walker_context, req.temperature, req.max_tokens,
+            ).await.unwrap_or_else(|e| {
+                tracing::warn!("Ollama fallback also failed: {}", e);
+                walker_context.clone()
+            })
+        }
+    } else {
+        // No provider configured — direct Ollama (backward compatible)
+        forward_to_ollama(
+            &state.ollama_url, &state.expression_model,
+            &req.messages, &walker_context, req.temperature, req.max_tokens,
+        ).await.unwrap_or_else(|e| {
+            tracing::warn!("Ollama forward failed: {}. Returning walker context as fallback.", e);
+            walker_context.clone()
+        })
+    };
     let expr_ms = expr_start.elapsed().as_secs_f64() * 1000.0;
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
 
